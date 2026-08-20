@@ -48,5 +48,25 @@ zsh scripts/package-macos.sh
 
 This builds an ad-hoc signed `dist/Philon.app` with the locally compiled Apple Vision helper. The ad-hoc seal is what lets `codesign --verify` pass; owner-managed Developer ID signing, notarization, and release distribution remain intentionally separate.
 
+## Releases
+
+A version number here describes the application, and tracks the source project
+so that a Philon release and its port are not confusing to compare. The engine
+contract and the IR version are separate and both remain at 0.2.0, so a
+document converted by either project at any 0.2.x carries the same evidence.
+
+**0.2.2** — Version parity only; nothing in this port changed. The engine
+shutdown fix that prompted Philon 0.2.2 does not apply here: that bug was in
+the Tauri host, which spawns the engine as a sidecar and left it running after
+quitting. This port imports the engine into its own process, so there is no
+sidecar to orphan. The packaging script and docs stopped calling the bundle
+unsigned, which it has not been since it started carrying an ad-hoc seal.
+
+**0.2.1** — The packaged application declares `com.tsevis.philon-python` rather
+than PyInstaller's bare `Philon` default. The identifier is passed on the
+command line in `scripts/package-macos.sh`, because that invocation regenerates
+the spec file on every run and a hand-edited spec was being silently
+overwritten. The project is licensed MIT.
+
 See [the parity report](docs/PARITY.md) for implementation and validation status, including externally gated functionality.
 
