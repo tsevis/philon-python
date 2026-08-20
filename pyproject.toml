@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "philon-python"
+version = "0.2.0"
+description = "A local-first evidence-preserving document conversion desktop application"
+requires-python = ">=3.10"
+license = {text = "Apache-2.0"}
+dependencies = [
+  "PySide6>=6.6,<7",
+  "pypdfium2>=4.30.0",
+  "pypdf>=5.0.0",
+  "Pillow>=10.0.0",
+]
+
+[project.scripts]
+philon = "philon_desktop.app:main"
+
+[tool.setuptools]
+packages = ["philon_desktop", "engine"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

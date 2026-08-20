@@ -1,0 +1,25 @@
+{
+  "corpus_name": "private-research-rag-gold",
+  "version": "2026.08",
+  "comparators": {
+    "marker": {
+      "version_command": ["/absolute/path/to/marker/.venv/bin/python", "-c", "import importlib.metadata; print(importlib.metadata.version('marker-pdf'))"],
+      "command": ["/absolute/path/to/marker/.venv/bin/marker_single", "{input}", "--output_dir", "{output}", "--output_format", "markdown", "--disable_multiprocessing", "--disable_tqdm"],
+      "timeout_seconds": 900
+    }
+  },
+  "documents": [
+    {
+      "id": "born-digital-paper",
+      "path": "/absolute/path/to/paper.pdf",
+      "cohort": "clean-born-digital",
+      "expected": { "min_pages": 1, "max_warnings": 0, "gold_markdown_path": "/absolute/path/to/gold/born-digital-paper.md", "required_outputs": ["markdown", "html", "ir", "marker_json", "chunks", "evidence", "manifest"] }
+    },
+    {
+      "id": "scanned-table-paper",
+      "path": "/absolute/path/to/scan.pdf",
+      "cohort": "scanned-research",
+      "expected": { "min_pages": 1, "max_warnings": 20 }
+    }
+  ]
+}

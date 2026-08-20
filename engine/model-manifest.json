@@ -1,0 +1,90 @@
+{
+  "schema_version": "1.2",
+  "policy": "Default releases require commercially-safe packs. This private local installation may manually use user-authorized local packs, always retaining unselected evidence candidates.",
+  "packs": [
+    {
+      "id": "apple-vision-ocr",
+      "role": "on-device OCR with source-line confidence and geometry",
+      "required": true,
+      "approved": true,
+      "distribution": "macOS-system-framework",
+      "integrity": "Apple platform runtime",
+      "license": "Apple platform runtime",
+      "runtime": "Vision.framework"
+    },
+    {
+      "id": "native-pdfium",
+      "role": "native extraction and rendering",
+      "required": true,
+      "approved": true,
+      "distribution": "bundled-runtime",
+      "integrity": "runtime-managed",
+      "license": "BSD-3-Clause / Apache-2.0",
+      "runtime": "pypdfium2"
+    },
+    {
+      "id": "layout-ocr",
+      "role": "region layout and OCR",
+      "required": false,
+      "approved": false,
+      "distribution": "not-distributed",
+      "integrity": null,
+      "license": "UNRESOLVED - benchmark and legal review required before distribution",
+      "runtime": "adapter only"
+    },
+    {
+      "id": "local-repair",
+      "role": "manual local VLM repair",
+      "required": false,
+      "approved": false,
+      "distribution": "not-distributed",
+      "integrity": null,
+      "license": "UNRESOLVED - model card and licence approval required before distribution",
+      "runtime": "adapter only"
+    },
+    {
+      "id": "olmocr-2-7b-local-candidate",
+      "role": "candidate OCR for manually selected difficult document regions",
+      "required": false,
+      "approved": true,
+      "distribution": "user-managed-local-copy",
+      "integrity": "Per-repair local manifest fingerprint; Philon does not distribute these user-managed weights",
+      "license": "Apache-2.0 — official olmOCR-2 model card verified 2026-08-16",
+      "runtime": "MLX-VLM external local runtime (not bundled)",
+      "discovery_paths": ["~/AI/ClaudeCode/mozaix/models/richardyoung/olmOCR-2-7B-1025-MLX-6bit"]
+    },
+    {
+      "id": "qwen2.5-vl-3b-local-candidate",
+      "role": "candidate manual visual repair for selected evidence blocks",
+      "required": false,
+      "approved": false,
+      "distribution": "user-managed-local-copy",
+      "integrity": null,
+      "license": "Qwen Research License — non-commercial; blocked from Philon production use",
+      "runtime": "MLX adapter (not bundled)",
+      "discovery_paths": ["~/AI/ClaudeCode/mozaix/models/Qwen2.5-VL-3B-Instruct"]
+    },
+    {
+      "id": "qwen3.8-27b-local-repair",
+      "role": "preferred manual multimodal repair for selected document evidence regions",
+      "required": false,
+      "approved": true,
+      "distribution": "user-managed-local-copy",
+      "integrity": "Per-repair local GGUF artifact fingerprint; Philon does not distribute these user-managed weights",
+      "license": "User-authorized private local use; never bundled or uploaded by Philon",
+      "runtime": "llama.cpp local CLI with multimodal projector",
+      "discovery_paths": ["~/.cache/huggingface/hub/models--unsloth--Qwen3.8-27B-GGUF/snapshots/*"]
+    },
+    {
+      "id": "bge-m3-local-candidate",
+      "role": "local embeddings for Verified RAG sidecar export",
+      "required": false,
+      "approved": true,
+      "distribution": "user-managed-local-copy",
+      "integrity": "Per-export local GGUF artifact fingerprint; Philon does not distribute these user-managed weights",
+      "license": "MIT — user-authorized private local use",
+      "runtime": "llama.cpp local embedding CLI",
+      "discovery_paths": ["~/.cache/huggingface/hub/models--ggml-org--bge-m3-Q8_0-GGUF/snapshots/*"]
+    }
+  ]
+}

@@ -1,0 +1,9 @@
+build/
+dist/
+.venv/
+*.pyc
+__pycache__/
+engine/dist/
+Philon.spec
+bench/results/
+.DS_Store
