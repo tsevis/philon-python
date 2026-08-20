@@ -4,7 +4,7 @@
 set -euo pipefail
 
 ROOT_DIR="${0:A:h:h}"
-APP_VERSION="0.2.0"
+APP_VERSION="0.2.1"
 cd "${ROOT_DIR}"
 
 python3 -m pip install --requirement requirements-build.txt
