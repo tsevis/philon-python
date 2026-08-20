@@ -1,10 +1,11 @@
 #!/bin/zsh
-# Build an unsigned, local-only Apple Silicon application bundle. Signing and
+# Build an ad-hoc signed, local-only Apple Silicon application bundle. The
+# ad-hoc seal is what lets `codesign --verify` pass; Developer ID signing and
 # notarization deliberately remain owner-controlled release actions.
 set -euo pipefail
 
 ROOT_DIR="${0:A:h:h}"
-APP_VERSION="0.2.1"
+APP_VERSION="0.2.2"
 cd "${ROOT_DIR}"
 
 python3 -m pip install --requirement requirements-build.txt
@@ -25,4 +26,4 @@ pyinstaller --noconfirm --clean --windowed --name Philon \
   -c "Add :CFBundleVersion string ${APP_VERSION}" \
   "dist/Philon.app/Contents/Info.plist"
 codesign --force --sign - "dist/Philon.app"
-echo "Unsigned app bundle: ${ROOT_DIR}/dist/Philon.app"
+echo "Ad-hoc signed, un-notarized app bundle: ${ROOT_DIR}/dist/Philon.app"

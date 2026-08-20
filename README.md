@@ -46,7 +46,7 @@ On an Apple Silicon Mac with Xcode command-line tools:
 zsh scripts/package-macos.sh
 ```
 
-This builds an unsigned `dist/Philon.app` with the locally compiled Apple Vision helper. Code signing in the script is ad-hoc only; owner-managed Developer ID signing, notarization, and release distribution remain intentionally separate.
+This builds an ad-hoc signed `dist/Philon.app` with the locally compiled Apple Vision helper. The ad-hoc seal is what lets `codesign --verify` pass; owner-managed Developer ID signing, notarization, and release distribution remain intentionally separate.
 
 See [the parity report](docs/PARITY.md) for implementation and validation status, including externally gated functionality.
 
