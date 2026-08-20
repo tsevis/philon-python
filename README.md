@@ -46,7 +46,9 @@ On an Apple Silicon Mac with Xcode command-line tools:
 zsh scripts/package-macos.sh
 ```
 
-This builds an ad-hoc signed `dist/Philon.app` with the locally compiled Apple Vision helper. The ad-hoc seal is what lets `codesign --verify` pass; owner-managed Developer ID signing, notarization, and release distribution remain intentionally separate.
+The script creates `.venv` if it is missing and builds from it, so the bundle
+carries the four runtime dependencies and nothing else that happens to be
+importable on the machine. It builds an ad-hoc signed `dist/Philon.app` with the locally compiled Apple Vision helper. The ad-hoc seal is what lets `codesign --verify` pass; owner-managed Developer ID signing, notarization, and release distribution remain intentionally separate.
 
 ## Releases
 
@@ -54,6 +56,19 @@ A version number here describes the application, and tracks the source project
 so that a Philon release and its port are not confusing to compare. The engine
 contract and the IR version are separate and both remain at 0.2.0, so a
 document converted by either project at any 0.2.x carries the same evidence.
+
+**0.2.3** — Packaging builds from the project virtual environment instead of
+whatever interpreter is on `PATH`. PyInstaller collects what it can import, so
+building from a general-purpose environment shipped it: the 0.2.2 bundle
+carried numpy, IPython, matplotlib and a compiler toolchain, weighed 216MB, and
+had an SBOM that could not honestly describe it. The same environment now runs
+the verification, so the versions under test are the versions in the bundle,
+and the SBOM records every one of them.
+
+Closing the window also waits for background work. A `QThread` destroyed while
+still running aborts the process, so quitting during a library refresh or an
+export crashed rather than closed; the upgrade to PySide6 6.11 made it
+reproducible.
 
 **0.2.2** — Version parity only; nothing in this port changed. The engine
 shutdown fix that prompted Philon 0.2.2 does not apply here: that bug was in

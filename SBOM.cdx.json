@@ -2,13 +2,239 @@
   "bomFormat": "CycloneDX",
   "specVersion": "1.5",
   "serialNumber": "urn:uuid:9a1f6b37-a768-4e81-8195-8ef75b8a6600",
-  "version": 1,
-  "metadata": {"component": {"type": "application", "name": "Philon Python", "version": "0.2.2", "licenses": [{"license": {"id": "MIT"}}]}},
+  "version": 2,
+  "metadata": {
+    "component": {
+      "type": "application",
+      "name": "Philon Python",
+      "version": "0.2.3",
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ]
+    }
+  },
   "components": [
-    {"type": "library", "name": "PySide6", "version": "6.x", "licenses": [{"license": {"id": "LGPL-3.0-only"}}]},
-    {"type": "library", "name": "pypdfium2", "version": "4.30+", "licenses": [{"license": {"id": "BSD-3-Clause"}}]},
-    {"type": "library", "name": "pypdf", "version": "5.0+", "licenses": [{"license": {"id": "BSD-3-Clause"}}]},
-    {"type": "library", "name": "Pillow", "version": "10.0+", "licenses": [{"license": {"id": "HPND"}}]},
-    {"type": "library", "name": "PyInstaller", "version": "6.18.0", "licenses": [{"license": {"id": "GPL-2.0-only WITH Bootloader-exception"}}]}
+    {
+      "type": "framework",
+      "name": "PySide6",
+      "version": "6.11.2",
+      "scope": "required",
+      "purl": "pkg:pypi/pyside6@6.11.2",
+      "licenses": [
+        {
+          "license": {
+            "id": "LGPL-3.0-only"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "philon:distribution",
+          "value": "shipped"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "shiboken6",
+      "version": "6.11.2",
+      "scope": "required",
+      "purl": "pkg:pypi/shiboken6@6.11.2",
+      "licenses": [
+        {
+          "license": {
+            "id": "LGPL-3.0-only"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "philon:distribution",
+          "value": "shipped"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "pypdfium2",
+      "version": "5.13.0",
+      "scope": "required",
+      "purl": "pkg:pypi/pypdfium2@5.13.0",
+      "licenses": [
+        {
+          "license": {
+            "id": "BSD-3-Clause"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "philon:distribution",
+          "value": "shipped"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "pypdf",
+      "version": "6.16.1",
+      "scope": "required",
+      "purl": "pkg:pypi/pypdf@6.16.1",
+      "licenses": [
+        {
+          "license": {
+            "id": "BSD-3-Clause"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "philon:distribution",
+          "value": "shipped"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "Pillow",
+      "version": "12.3.0",
+      "scope": "required",
+      "purl": "pkg:pypi/pillow@12.3.0",
+      "licenses": [
+        {
+          "license": {
+            "id": "HPND"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "philon:distribution",
+          "value": "shipped"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "PyInstaller",
+      "version": "6.18.0",
+      "scope": "excluded",
+      "purl": "pkg:pypi/pyinstaller@6.18.0",
+      "licenses": [
+        {
+          "license": {
+            "id": "GPL-2.0-only"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "philon:distribution",
+          "value": "build-only"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "pyinstaller-hooks-contrib",
+      "version": "2026.6",
+      "scope": "excluded",
+      "purl": "pkg:pypi/pyinstaller-hooks-contrib@2026.6",
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "philon:distribution",
+          "value": "build-only"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "altgraph",
+      "version": "0.17.5",
+      "scope": "excluded",
+      "purl": "pkg:pypi/altgraph@0.17.5",
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "philon:distribution",
+          "value": "build-only"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "macholib",
+      "version": "1.16.4",
+      "scope": "excluded",
+      "purl": "pkg:pypi/macholib@1.16.4",
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "philon:distribution",
+          "value": "build-only"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "packaging",
+      "version": "26.3",
+      "scope": "excluded",
+      "purl": "pkg:pypi/packaging@26.3",
+      "licenses": [
+        {
+          "expression": "Apache-2.0 OR BSD-2-Clause"
+        }
+      ],
+      "properties": [
+        {
+          "name": "philon:distribution",
+          "value": "build-only"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "name": "setuptools",
+      "version": "84.0.0",
+      "scope": "excluded",
+      "purl": "pkg:pypi/setuptools@84.0.0",
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "philon:distribution",
+          "value": "build-only"
+        }
+      ]
+    }
   ]
 }

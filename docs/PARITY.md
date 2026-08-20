@@ -18,7 +18,7 @@ The Python port retains the original engine and harness as its conversion/eviden
 | Persistent batch behavior | Implemented and verified | SQLite queue survives process restart, recovers interrupted running item, supports pause-after-current, cancel pending, retry, resume and export completed bundles. |
 | Local model governance | Implemented and verified | Canonical manifest, approval/integrity/licence gates, offline discovery/readiness, manual-only Qwen/olmOCR, optional BGE-M3 sidecar. |
 | Benchmark harness | Implemented and verified | Canonical cold/warm cache timing, contract checks, private-gold metrics and isolated comparator execution. |
-| Local-only, licence, SBOM, fuzz/release checks | Implemented and verified | Python policy scripts, CycloneDX SBOM, engine fuzz tests and macOS package script. |
+| Local-only, licence, SBOM, fuzz/release checks | Implemented and verified | Python policy scripts, CycloneDX SBOM, engine fuzz tests and macOS package script. The SBOM policy requires a resolved version and a declared distribution for every component, and fails if a runtime requirement is undeclared. |
 
 ## Validation performed
 
