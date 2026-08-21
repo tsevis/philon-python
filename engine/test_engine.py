@@ -747,11 +747,46 @@ class PhilonEngineTest(unittest.TestCase):
         """
         health = engine.native_health("Adobe Photoshop \uf6d9 and G \ue09ex\ue09f")
         self.assertEqual(health["private_use_characters"], 3)
-        self.assertEqual(engine.clean_reading_text("Adobe Photoshop \uf6d9"), "Adobe Photoshop \uf6d9")
+        # One of the three is Adobe's, and is resolved; the other two belong to
+        # a font's own encoding and are what the warning is actually about.
+        self.assertEqual(health["adobe_glyph_variants"], 1)
+        self.assertEqual(health["unresolved_private_use_characters"], 2)
+        self.assertEqual(engine.clean_reading_text("G \ue09ex\ue09f"), "G \ue09ex\ue09f")
         pages = [{"id": "page-1", "number": 1, "method": "pdfium-native",
                   "route": {"native_text_health": health}}]
         codes = [warning.code for warning in engine.verified_checks(pages, [])]
         self.assertIn("PRIVATE_USE_CHARACTERS", codes)
+
+    def test_an_adobe_subarea_glyph_is_transcribed_not_guessed(self):
+        """Adobe's Corporate Use Subarea is a published assignment.
+
+        It names typographic VARIANTS of characters that already have a Unicode
+        value, so resolving one transcribes what Adobe states and loses only the
+        variant form. U+F6D9 is `copyrightserif`; the same paper's CMSY6 font
+        names that glyph `/circlecopyrt`, which corroborates it independently.
+        """
+        self.assertEqual(engine.ADOBE_GLYPH_VARIANTS[0xF6D9], 0x00A9)
+        self.assertEqual(engine.ADOBE_GLYPH_VARIANTS[0xF6DB], 0x2122)
+        self.assertEqual(engine.ADOBE_GLYPH_VARIANTS[0xF730], ord("0"))
+        self.assertEqual(engine.clean_reading_text("Adobe Photoshop \uf6d9"), "Adobe Photoshop \u00a9")
+        # Every entry names a real character, never another private-use one.
+        for source, target in engine.ADOBE_GLYPH_VARIANTS.items():
+            self.assertTrue(0xF600 <= source <= 0xF8FF, hex(source))
+            self.assertLess(target, 0xE000, hex(source))
+
+    def test_a_font_private_glyph_is_left_exactly_as_extracted(self):
+        """The control, and the reason the subarea rule stops where it does.
+
+        A maths font's own assignment means nothing outside that font. One
+        reference paper proves it: its OpenSymbol ToUnicode CMap maps some codes
+        to real characters and deliberately leaves the rest in the private-use
+        area, which is the producer stating its own limit rather than an
+        omission to repair.
+        """
+        for text in ["G \ue09ex , y \ue09f", "\ue0c2\ue085\ue0b2", "\uf0a7 a bullet"]:
+            self.assertEqual(engine.clean_reading_text(text), engine.clean_reading_text(text))
+        self.assertEqual(engine.clean_reading_text("G \ue09ex , y \ue09f"), "G \ue09ex , y \ue09f")
+        self.assertNotIn(0xE09E, engine.ADOBE_GLYPH_VARIANTS)
 
     def test_a_page_with_no_private_use_characters_raises_no_such_warning(self):
         health = engine.native_health("Ordinary measured prose.")
