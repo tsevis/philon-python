@@ -774,6 +774,30 @@ class PhilonEngineTest(unittest.TestCase):
             self.assertTrue(0xF600 <= source <= 0xF8FF, hex(source))
             self.assertLess(target, 0xE000, hex(source))
 
+    def test_only_the_unambiguous_variant_families_are_resolved(self):
+        """A small capital and a superior letter are deliberately left alone.
+
+        A serif copyright sign IS the copyright sign and an old-style figure IS
+        that digit, so resolving either decides nothing. `Asmall` could
+        reasonably be "A" or "a" -- the AGL name settles the shape, not the
+        case -- and a superior letter carries its position as part of its
+        meaning, so flattening it to the base letter silently drops a footnote
+        marker or an ordinal. Both stay private-use and are reported as
+        unreadable, which is the honest answer rather than the fuller-looking
+        one.
+        """
+        self.assertEqual(len(engine.ADOBE_GLYPH_VARIANTS), 16)
+        for resolved in [0xF6D9, 0xF6DB, 0xF8E9, 0xF8EA, 0xF730, 0xF739, 0xF724, 0xF7A2]:
+            self.assertIn(resolved, engine.ADOBE_GLYPH_VARIANTS, hex(resolved))
+        for left_alone in [0xF761, 0xF762, 0xF6E9, 0xF6EA, 0xF6E0, 0xF6DF]:
+            self.assertNotIn(left_alone, engine.ADOBE_GLYPH_VARIANTS, hex(left_alone))
+        # A small capital therefore survives into the reading text untouched,
+        # and is counted as unreadable rather than silently flattened.
+        self.assertEqual(engine.clean_reading_text("P\uf761ris"), "P\uf761ris")
+        health = engine.native_health("P\uf761ris")
+        self.assertEqual(health["adobe_glyph_variants"], 0)
+        self.assertEqual(health["unresolved_private_use_characters"], 1)
+
     def test_a_font_private_glyph_is_left_exactly_as_extracted(self):
         """The control, and the reason the subarea rule stops where it does.
 
