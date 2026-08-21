@@ -2073,7 +2073,49 @@ def accessibility_report(ir: dict[str, Any]) -> dict[str, Any]:
     return {"status": "assessed", "findings": findings}
 
 
-def render_source_previews(path: Path, output_dir: Path, page_count: int) -> tuple[list[str], list[WarningRecord]]:
+#: The phases after the IR cache write large files into a content-addressed
+#: destination, so a second conversion of the same bytes regenerates work it
+#: already has on disk. A manifest written atomically AFTER a phase succeeds is
+#: what makes reuse safe: an interrupted run leaves no manifest, so it cannot be
+#: mistaken for a finished one.
+ARTIFACT_MANIFEST_VERSION = "1.2"
+
+
+def verified_artifact_manifest(manifest_path: Path, source: Path, expected_source_pages: int | None = None) -> dict[str, Any] | None:
+    """Read a phase manifest only if every file it claims is still exactly right.
+
+    Verifies the recorded sha256 of each file rather than its size alone. That
+    costs milliseconds against the seconds the phase takes, and it is what lets
+    reuse be equivalent to recomputation rather than merely likely to be.
+    """
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(manifest, dict) or manifest.get("schema_version") != ARTIFACT_MANIFEST_VERSION:
+        return None
+    # Provenance is recorded per conversion, so a manifest written for another
+    # source path is not this document's evidence even if the bytes match.
+    if manifest.get("source") != str(source):
+        return None
+    if expected_source_pages is not None and manifest.get("source_pages") != expected_source_pages:
+        return None
+    for item in manifest.get("items", []):
+        if not isinstance(item, dict):
+            return None
+        recorded = item.get("bytes_sha256")
+        target = Path(str(item.get("path", "")))
+        if not recorded or not target.is_file():
+            return None
+        try:
+            if sha256_file(target) != recorded:
+                return None
+        except OSError:
+            return None
+    return manifest
+
+
+def render_source_previews(path: Path, output_dir: Path, page_count: int, reuse: bool = False) -> tuple[list[str], list[WarningRecord]]:
     """Export bounded local page rasters for source review, never as OCR input.
 
     These preview assets let the desktop client draw an evidence rectangle over
@@ -2082,6 +2124,11 @@ def render_source_previews(path: Path, output_dir: Path, page_count: int) -> tup
     """
     preview_dir = output_dir / "assets" / "page-previews"
     preview_dir.mkdir(parents=True, exist_ok=True)
+    manifest_path = preview_dir / "manifest.json"
+    if reuse:
+        recorded = verified_artifact_manifest(manifest_path, path, page_count)
+        if recorded is not None:
+            return [str(item["path"]) for item in recorded["items"]], []
     previews: list[str] = []
     warnings: list[WarningRecord] = []
     try:
@@ -2119,6 +2166,13 @@ def render_source_previews(path: Path, output_dir: Path, page_count: int) -> tup
             previews.append(str(target))
     except Exception as exc:
         warnings.append(WarningRecord("SOURCE_PREVIEW_UNAVAILABLE", f"A local source preview could not be rendered: {exc}"))
+        return previews, warnings
+    # Written only once every page rendered, and written atomically, so an
+    # interrupted run leaves no manifest and cannot be reused.
+    atomic_write_text(manifest_path, json.dumps({
+        "schema_version": ARTIFACT_MANIFEST_VERSION, "source": str(path), "source_pages": page_count,
+        "items": [{"path": item, "bytes_sha256": sha256_file(Path(item))} for item in previews],
+    }, indent=2, ensure_ascii=False))
     return previews, warnings
 
 
@@ -2172,7 +2226,7 @@ def describe_native_pdf_image(image: Any) -> tuple[bytes, str, dict[str, Any]]:
     return data, suffix, metadata
 
 
-def extract_native_pdf_assets(path: Path, output_dir: Path) -> tuple[dict[str, Any] | None, list[WarningRecord]]:
+def extract_native_pdf_assets(path: Path, output_dir: Path, reuse: bool = False) -> tuple[dict[str, Any] | None, list[WarningRecord]]:
     """Extract native PDF image streams with byte/hash/page provenance.
 
     This is intentionally extraction, not image understanding: captions and
@@ -2186,6 +2240,15 @@ def extract_native_pdf_assets(path: Path, output_dir: Path) -> tuple[dict[str, A
     # document-conversion tools do. Page-review rasters remain internal under
     # assets/, while source images are portable deliverables in images/.
     asset_dir = output_dir / "images"
+    manifest_path = asset_dir / "manifest.json"
+    if reuse:
+        recorded = verified_artifact_manifest(manifest_path, path)
+        if recorded is not None:
+            # The warnings are replayed from the manifest, not dropped: a run
+            # that hit the asset limit must say so again, or reusing its work
+            # would quietly turn a truncated export into a complete-looking one.
+            replayed = [WarningRecord(**warning) for warning in recorded.get("warnings", [])]
+            return {"manifest": str(manifest_path), "items": recorded.get("items", [])}, replayed
     items: list[dict[str, Any]] = []
     references: dict[str, dict[str, Any]] = {}
     written_bytes = 0
@@ -2207,8 +2270,7 @@ def extract_native_pdf_assets(path: Path, output_dir: Path) -> tuple[dict[str, A
                     continue
                 if len(items) >= MAX_EXTRACTED_ASSETS or written_bytes + len(data) > MAX_EXTRACTED_ASSET_BYTES:
                     warnings.append(WarningRecord("ASSET_EXTRACTION_LIMIT", "Native image extraction reached Philon's bounded asset limit. Remaining source images were not exported.", page=page_index))
-                    manifest_path = asset_dir / "manifest.json"
-                    atomic_write_text(manifest_path, json.dumps({"schema_version": "1.1", "source": str(path), "items": items, "limits": {"max_assets": MAX_EXTRACTED_ASSETS, "max_bytes": MAX_EXTRACTED_ASSET_BYTES}, "truncated": True}, indent=2, ensure_ascii=False))
+                    atomic_write_text(manifest_path, json.dumps({"schema_version": ARTIFACT_MANIFEST_VERSION, "source": str(path), "items": items, "limits": {"max_assets": MAX_EXTRACTED_ASSETS, "max_bytes": MAX_EXTRACTED_ASSET_BYTES}, "truncated": True, "warnings": [asdict(warning) for warning in warnings]}, indent=2, ensure_ascii=False))
                     return {"manifest": str(manifest_path), "items": items}, warnings
                 filename = f"asset-{len(items) + 1:04}-{digest[:12]}{suffix}"
                 target = asset_dir / filename
@@ -2221,8 +2283,7 @@ def extract_native_pdf_assets(path: Path, output_dir: Path) -> tuple[dict[str, A
                 items.append(record)
                 references[digest] = record
                 written_bytes += len(data)
-        manifest = {"schema_version": "1.1", "source": str(path), "items": items, "limits": {"max_assets": MAX_EXTRACTED_ASSETS, "max_bytes": MAX_EXTRACTED_ASSET_BYTES}}
-        manifest_path = asset_dir / "manifest.json"
+        manifest = {"schema_version": ARTIFACT_MANIFEST_VERSION, "source": str(path), "items": items, "limits": {"max_assets": MAX_EXTRACTED_ASSETS, "max_bytes": MAX_EXTRACTED_ASSET_BYTES}, "warnings": [asdict(warning) for warning in warnings]}
         atomic_write_text(manifest_path, json.dumps(manifest, indent=2, ensure_ascii=False))
         return {"manifest": str(manifest_path), "items": items}, warnings
     except Exception as exc:
@@ -2441,13 +2502,20 @@ def convert_file(path: Path, profile: str, output_root: Path, cache_root: Path, 
     extracted_assets: dict[str, Any] | None = None
     overlay_paths: list[str] = []
     needs_source_previews = bool({"assets", "html", "machine"} & selected_outputs)
+    # The cache covered make_ir alone, which is 17.7% of a text-heavy document
+    # and 1.1% of an image-heavy one, so a hit saved almost nothing on exactly
+    # the documents that cost the most. These two phases are the expensive ones
+    # and their outputs already live in a content-addressed destination; reusing
+    # them is what makes a warm conversion warm. `bypass` and `refresh` still
+    # recompute, so a caller can always demand the work be done again.
+    reuse_artifacts = cache_policy == "use"
     if needs_source_previews:
         report("previews", 76, "Rendering source previews for review")
-        preview_paths, preview_warnings = render_source_previews(path, destination, len(ir["pages"]))
+        preview_paths, preview_warnings = render_source_previews(path, destination, len(ir["pages"]), reuse=reuse_artifacts)
         warnings.extend(preview_warnings)
     if "assets" in selected_outputs:
         report("assets", 86, "Extracting native source assets")
-        extracted_assets, extraction_warnings = extract_native_pdf_assets(path, destination)
+        extracted_assets, extraction_warnings = extract_native_pdf_assets(path, destination, reuse=reuse_artifacts)
         warnings.extend(extraction_warnings)
         attach_native_pdf_assets_to_ir(ir, extracted_assets, destination)
         overlay_paths = render_source_overlay_diagnostics(ir, destination)

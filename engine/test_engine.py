@@ -927,6 +927,107 @@ class PhilonEngineTest(unittest.TestCase):
         self.assertFalse(engine.stands_alone_as_numbered_heading(
             "3. " + "a numbered sentence that simply runs on and on past any heading length" * 2))
 
+    def _small_pdf(self, directory, pages=2):
+        from pypdf import PdfWriter
+        source = Path(directory) / "reuse.pdf"
+        writer = PdfWriter()
+        for _ in range(pages):
+            writer.add_blank_page(width=200, height=200)
+        with source.open("wb") as stream:
+            writer.write(stream)
+        return source
+
+    def test_source_previews_are_reused_only_after_a_complete_run(self):
+        """The cache covered make_ir alone, which is 1.1% of an image-heavy
+        document, so a hit saved nothing on exactly the documents that cost the
+        most. The expensive phases are reusable because their destination is
+        content-addressed -- but only when a manifest proves the run finished.
+        """
+        try:
+            import pypdfium2  # noqa: F401
+        except ImportError:
+            self.skipTest("pypdfium2 is not installed")
+        with tempfile.TemporaryDirectory() as directory:
+            source = self._small_pdf(directory)
+            out = Path(directory) / "out"
+            first, _ = engine.render_source_previews(source, out, 2)
+            manifest = out / "assets" / "page-previews" / "manifest.json"
+            self.assertTrue(manifest.is_file())
+            again, _ = engine.render_source_previews(source, out, 2, reuse=True)
+            self.assertEqual(first, again)
+
+            # An interrupted run leaves no manifest, so it cannot be reused.
+            manifest.unlink()
+            self.assertIsNone(engine.verified_artifact_manifest(manifest, source, 2))
+
+    def test_a_tampered_or_missing_artifact_is_never_reused(self):
+        """Reuse verifies the recorded sha256 of every file it claims."""
+        try:
+            import pypdfium2  # noqa: F401
+        except ImportError:
+            self.skipTest("pypdfium2 is not installed")
+        with tempfile.TemporaryDirectory() as directory:
+            source = self._small_pdf(directory)
+            out = Path(directory) / "out"
+            previews, _ = engine.render_source_previews(source, out, 2)
+            manifest = out / "assets" / "page-previews" / "manifest.json"
+            self.assertIsNotNone(engine.verified_artifact_manifest(manifest, source, 2))
+
+            Path(previews[0]).write_bytes(b"not the rendered page")
+            self.assertIsNone(engine.verified_artifact_manifest(manifest, source, 2))
+
+            Path(previews[0]).unlink()
+            self.assertIsNone(engine.verified_artifact_manifest(manifest, source, 2))
+
+    def test_a_manifest_written_for_another_source_is_not_reused(self):
+        """Provenance is recorded per conversion, so another document's
+        manifest is not this one's evidence even where the bytes would match."""
+        try:
+            import pypdfium2  # noqa: F401
+        except ImportError:
+            self.skipTest("pypdfium2 is not installed")
+        with tempfile.TemporaryDirectory() as directory:
+            source = self._small_pdf(directory)
+            other = Path(directory) / "other.pdf"
+            other.write_bytes(source.read_bytes())
+            out = Path(directory) / "out"
+            engine.render_source_previews(source, out, 2)
+            manifest = out / "assets" / "page-previews" / "manifest.json"
+            self.assertIsNotNone(engine.verified_artifact_manifest(manifest, source, 2))
+            self.assertIsNone(engine.verified_artifact_manifest(manifest, other, 2))
+            # A different page count is a different run too.
+            self.assertIsNone(engine.verified_artifact_manifest(manifest, source, 3))
+
+    def test_a_stale_manifest_version_is_not_reused(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "x.pdf"
+            source.write_bytes(b"%PDF-1.4\n")
+            manifest = Path(directory) / "manifest.json"
+            manifest.write_text(json.dumps({"schema_version": "1.1", "source": str(source), "items": []}))
+            self.assertIsNone(engine.verified_artifact_manifest(manifest, source))
+
+    def test_an_asset_limit_warning_is_replayed_when_the_work_is_reused(self):
+        """A truncated export must keep saying it is truncated.
+
+        Reusing the files without the warning would quietly turn a bounded
+        extraction into a complete-looking one.
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "y.pdf"
+            source.write_bytes(b"%PDF-1.4\n")
+            out = Path(directory) / "out"
+            (out / "images").mkdir(parents=True)
+            manifest = out / "images" / "manifest.json"
+            manifest.write_text(json.dumps({
+                "schema_version": engine.ARTIFACT_MANIFEST_VERSION, "source": str(source), "items": [],
+                "truncated": True,
+                "warnings": [{"code": "ASSET_EXTRACTION_LIMIT", "message": "bounded", "page": 3, "block_id": None}],
+            }))
+            assets, warnings = engine.extract_native_pdf_assets(source, out, reuse=True)
+            self.assertIsNotNone(assets)
+            self.assertEqual([warning.code for warning in warnings], ["ASSET_EXTRACTION_LIMIT"])
+            self.assertEqual(warnings[0].page, 3)
+
     def test_a_float_caption_is_a_caption_and_not_a_section_heading(self):
         """An algorithm listing has a title, not a section of the document.
 
