@@ -750,6 +750,10 @@ def native_health(text: str) -> dict[str, Any]:
     # it (that would invent text). It is counted, and the record says so.
     private_use = sum(1 for char in text if 0xE000 <= ord(char) <= 0xF8FF
                       or 0xF0000 <= ord(char) <= 0xFFFFD or 0x100000 <= ord(char) <= 0x10FFFD)
+    # Of those, the ones Adobe's published list names as variants of a real
+    # character, which the reading form resolves. The remainder is what
+    # genuinely cannot be read, and is what the warning is about.
+    adobe_variants = count_adobe_glyph_variants(text)
     alphanumeric = sum(char.isalnum() for char in text)
     punctuation = sum(not char.isalnum() and not char.isspace() for char in text)
     repeated_lines: dict[str, int] = {}
@@ -773,6 +777,8 @@ def native_health(text: str) -> dict[str, Any]:
         "native_text_present": bool(visible),
         "discardable_formatting_characters": discardable,
         "private_use_characters": private_use,
+        "adobe_glyph_variants": adobe_variants,
+        "unresolved_private_use_characters": private_use - adobe_variants,
         "replacement_characters": replacement,
         "control_characters": control,
         "invisible_characters": invisible,
@@ -1452,8 +1458,9 @@ def verified_checks(pages: list[dict[str, Any]], blocks: list[dict[str, Any]]) -
         health = page.get("route", {}).get("native_text_health", {})
         if health.get("invisible_characters", 0):
             findings.append(WarningRecord("INVISIBLE_TEXT_SUSPECTED", "Verified found zero-width characters in native text. The source text is retained unchanged; inspect this page before reuse.", page=page["number"]))
-        if health.get("private_use_characters", 0):
-            findings.append(WarningRecord("PRIVATE_USE_CHARACTERS", f"Verified found {health['private_use_characters']} character(s) this PDF's fonts never mapped to Unicode. They are retained exactly as extracted; Philon did not guess what they represent, so this page needs review before machine reuse.", page=page["number"]))
+        if health.get("unresolved_private_use_characters", health.get("private_use_characters", 0)):
+            unresolved = health.get("unresolved_private_use_characters", health.get("private_use_characters", 0))
+            findings.append(WarningRecord("PRIVATE_USE_CHARACTERS", f"Verified found {unresolved} character(s) this PDF's fonts never mapped to Unicode. They are retained exactly as extracted; Philon did not guess what they represent, so this page needs review before machine reuse.", page=page["number"]))
         if health.get("duplicate_source_line_count", 0) >= 3:
             findings.append(WarningRecord("DUPLICATE_SOURCE_LINES", "Verified found repeated native lines on this page. They may be intentional source content or overlapping/invisible PDF text; Philon retained them for review.", page=page["number"]))
         if page["method"] in {"pdfium-native", "apple-vision-ocr"}:
@@ -1549,6 +1556,70 @@ def make_ir(path: Path, profile: str) -> tuple[dict[str, Any], list[WarningRecor
     return ir, warnings, [Timing("native-extraction", round((time.perf_counter() - started) * 1000))]
 
 
+#: Adobe's Corporate Use Subarea (U+F600-U+F8FF) is a PUBLISHED assignment, not a
+#: font's private guess: it names typographic VARIANTS of characters that already
+#: have a Unicode value -- a serif copyright sign, an old-style figure, a small
+#: capital, a superior letter. Resolving one to its base character therefore
+#: transcribes what Adobe already states, and loses only the variant form; it
+#: never substitutes a different character. That is what separates this from the
+#: general private-use area, where a font's assignment means nothing outside
+#: that font and resolving it would be inventing text.
+#:
+#: Derived from the Adobe Glyph List, by taking every AGL name whose value falls
+#: in the subarea and whose name is a base name plus a variant suffix, and
+#: mapping it to that base name's own Unicode value. Regenerate with:
+#:
+#:     python3 tools/generate_adobe_glyph_variants.py
+#:
+#: 103 entries. U+F6D9 is `copyrightserif`, which is how "Adobe Photoshop (c)"
+#: reaches the text of one of the reference papers.
+ADOBE_GLYPH_VARIANTS: dict[int, int] = {
+    0xF6D9: 0x00A9, 0xF6DB: 0x2122, 0xF6DF: 0x00A2, 0xF6E0: 0x00A2, 0xF6E1: 0x002C, 0xF6E2:
+    0x002C, 0xF6E3: 0x0024, 0xF6E4: 0x0024, 0xF6E5: 0x002D, 0xF6E6: 0x002D, 0xF6E7: 0x002E,
+    0xF6E8: 0x002E, 0xF6E9: 0x0061, 0xF6EA: 0x0062, 0xF6EB: 0x0064, 0xF6EC: 0x0065, 0xF6ED:
+    0x0069, 0xF6EE: 0x006C, 0xF6EF: 0x006D, 0xF6F0: 0x006F, 0xF6F1: 0x0072, 0xF6F2: 0x0073,
+    0xF6F3: 0x0074, 0xF6F9: 0x0141, 0xF6FA: 0x0152, 0xF6FD: 0x0160, 0xF6FF: 0x017D, 0xF721:
+    0x0021, 0xF724: 0x0024, 0xF726: 0x0026, 0xF730: 0x0030, 0xF731: 0x0031, 0xF732: 0x0032,
+    0xF733: 0x0033, 0xF734: 0x0034, 0xF735: 0x0035, 0xF736: 0x0036, 0xF737: 0x0037, 0xF738:
+    0x0038, 0xF739: 0x0039, 0xF73F: 0x003F, 0xF761: 0x0041, 0xF762: 0x0042, 0xF763: 0x0043,
+    0xF764: 0x0044, 0xF765: 0x0045, 0xF766: 0x0046, 0xF767: 0x0047, 0xF768: 0x0048, 0xF769:
+    0x0049, 0xF76A: 0x004A, 0xF76B: 0x004B, 0xF76C: 0x004C, 0xF76D: 0x004D, 0xF76E: 0x004E,
+    0xF76F: 0x004F, 0xF770: 0x0050, 0xF771: 0x0051, 0xF772: 0x0052, 0xF773: 0x0053, 0xF774:
+    0x0054, 0xF775: 0x0055, 0xF776: 0x0056, 0xF777: 0x0057, 0xF778: 0x0058, 0xF779: 0x0059,
+    0xF77A: 0x005A, 0xF7A1: 0x00A1, 0xF7A2: 0x00A2, 0xF7BF: 0x00BF, 0xF7E0: 0x00C0, 0xF7E1:
+    0x00C1, 0xF7E2: 0x00C2, 0xF7E3: 0x00C3, 0xF7E4: 0x00C4, 0xF7E5: 0x00C5, 0xF7E6: 0x00C6,
+    0xF7E7: 0x00C7, 0xF7E8: 0x00C8, 0xF7E9: 0x00C9, 0xF7EA: 0x00CA, 0xF7EB: 0x00CB, 0xF7EC:
+    0x00CC, 0xF7ED: 0x00CD, 0xF7EE: 0x00CE, 0xF7EF: 0x00CF, 0xF7F0: 0x00D0, 0xF7F1: 0x00D1,
+    0xF7F2: 0x00D2, 0xF7F3: 0x00D3, 0xF7F4: 0x00D4, 0xF7F5: 0x00D5, 0xF7F6: 0x00D6, 0xF7F8:
+    0x00D8, 0xF7F9: 0x00D9, 0xF7FA: 0x00DA, 0xF7FB: 0x00DB, 0xF7FC: 0x00DC, 0xF7FD: 0x00DD,
+    0xF7FE: 0x00DE, 0xF7FF: 0x0178, 0xF8E9: 0x00A9, 0xF8EA: 0x2122
+}
+
+
+def resolve_adobe_glyph_variants(text: str) -> str:
+    """Replace Adobe Corporate Use Subarea glyphs with the characters they name.
+
+    Only the subarea, and only where Adobe's own list says the glyph is a
+    variant of a character that has a Unicode value. A private-use character
+    from anywhere else is left exactly as extracted: the font's assignment
+    means nothing outside that font, and one of the reference papers proves the
+    point -- its maths font ships a `/ToUnicode` CMap that maps some codes to
+    real characters and deliberately leaves the rest in the private-use area,
+    which is the producer stating its own limit. Resolving those would be
+    inventing text.
+    """
+    if not text:
+        return text
+    return "".join(
+        chr(ADOBE_GLYPH_VARIANTS[ord(character)]) if ord(character) in ADOBE_GLYPH_VARIANTS else character
+        for character in text
+    )
+
+
+def count_adobe_glyph_variants(text: str) -> int:
+    return sum(1 for character in text if ord(character) in ADOBE_GLYPH_VARIANTS)
+
+
 def is_discardable_formatting(character: str) -> bool:
     """True for a character that carries layout, never a word.
 
@@ -1581,7 +1652,7 @@ def clean_reading_text(text: str) -> str:
     strict consumer, so it is resolved here and never in `text`.
     """
     measured: list[tuple[str, bool]] = []
-    for raw_line in text.splitlines():
+    for raw_line in resolve_adobe_glyph_variants(text).splitlines():
         stripped = raw_line.strip()
         if not stripped:
             continue
