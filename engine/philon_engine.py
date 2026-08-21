@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import base64
+import ctypes
 import glob
 import hashlib
 import hmac
@@ -42,6 +43,7 @@ MAX_IMAGE_PIXELS = 100_000_000
 MAX_EXTRACTED_ASSETS = 1_000
 MAX_EXTRACTED_ASSET_BYTES = 250 * 1024 * 1024
 SUPPORTED_SUFFIXES = {".pdf", ".png", ".jpg", ".jpeg", ".tiff", ".tif", ".webp"}
+DEFAULT_OUTPUTS = ("machine", "markdown", "html", "ir", "chunks", "evidence", "table_csv", "assets", "manifest")
 MODEL_MANIFEST_PATH = Path(__file__).with_name("model-manifest.json")
 VISION_HELPER: Path | None = None
 
@@ -176,6 +178,7 @@ def preflight_input(path: Path) -> dict[str, Any]:
     if suffix == ".pdf":
         if not signature.startswith(b"%PDF-"):
             raise ValueError("PDF signature is invalid. Philon did not send this file to a parser.")
+        encryption = "none"
         try:
             from pypdf import PdfReader  # type: ignore
 
@@ -184,7 +187,15 @@ def preflight_input(path: Path) -> dict[str, Any]:
             try:
                 reader = PdfReader(str(path), strict=False)
                 if reader.is_encrypted:
-                    raise ValueError("Encrypted PDFs are unsupported in V1. Remove encryption locally and try again.")
+                    # A publisher PDF is commonly "encrypted" with an EMPTY user
+                    # password: it carries permission flags but opens for anyone,
+                    # and PDFium reads it without being given a password at all.
+                    # Refusing it would refuse a document the user can already
+                    # read, so the empty password is tried and the outcome is
+                    # recorded as evidence rather than assumed either way.
+                    if not reader.decrypt(""):
+                        raise ValueError("This PDF needs a password. Philon does not ask for one and did not send the file to a parser.")
+                    encryption = "opened-with-empty-user-password"
                 declared_pages = len(reader.pages)
             finally:
                 logging.disable(previous_logging_threshold)
@@ -202,6 +213,7 @@ def preflight_input(path: Path) -> dict[str, Any]:
             "bytes_sha256": sha256_file(path),
             "signature": "pdf",
             "declared_page_count": declared_pages,
+            "encryption": encryption,
             "limits": {"max_bytes": MAX_INPUT_BYTES, "max_pages": MAX_PDF_PAGES},
         }
     image_signatures = (b"\x89PNG\r\n\x1a\n", b"\xff\xd8\xff", b"II*\x00", b"MM\x00*", b"RIFF")
@@ -277,6 +289,13 @@ def is_numeric_source_marker(value: str) -> bool:
     return bool(re.fullmatch(r"[.·]?\s*\d{1,4}(?:\s+\d{1,4}){0,5}", value.strip()))
 
 
+#: How many pages a running-head variant must appear on before it is counted
+#: as one side of an alternating pair. Two is not enough -- a sentence can open
+#: two pages by chance -- and three is the same floor the whole-document rule
+#: already uses.
+ALTERNATING_MINIMUM_PAGES = 3
+
+
 def repeated_page_artifacts(source_pages: list[dict[str, Any]]) -> set[str]:
     """Find repeated first/last lines only when the evidence is strong.
 
@@ -291,8 +310,18 @@ def repeated_page_artifacts(source_pages: list[dict[str, Any]]) -> set[str]:
         for line in (lines[:2] + lines[-2:]):
             if 3 <= len(line) <= 130 and not line.isdigit():
                 counts[line] = counts.get(line, 0) + 1
+    # A running head is commonly set differently on left- and right-hand pages,
+    # so each variant appears on about half the pages and NEITHER reaches a
+    # 60% threshold. Requiring the strong evidence of a repeat is right; taking
+    # that evidence one variant at a time is what let a recto/verso header
+    # through on every page of a real paper. Variants are counted together and
+    # then each is judged on its own share.
     threshold = max(3, round(len(source_pages) * 0.6))
-    return {line for line, count in counts.items() if count >= threshold}
+    artifacts = {line for line, count in counts.items() if count >= threshold}
+    alternating = sum(count for line, count in counts.items() if count >= ALTERNATING_MINIMUM_PAGES)
+    if alternating >= threshold:
+        artifacts |= {line for line, count in counts.items() if count >= ALTERNATING_MINIMUM_PAGES}
+    return artifacts
 
 
 def is_formula(text: str) -> bool:
@@ -357,7 +386,15 @@ def structured_parts_with_spans(text: str, artifacts: set[str]) -> list[dict[str
 
 
 def ocr_parts_with_geometry(page: dict[str, Any], artifacts: set[str]) -> list[dict[str, Any]]:
-    """Turn Vision lines into conservative, measured reading blocks."""
+    """Turn Vision lines into conservative, measured reading blocks.
+
+    Vision supplies one observation per line, not paragraph boundaries.  The
+    previous exporter therefore treated a complete scan as one block.  This
+    uses only measured line positions and keeps Vision's supplied reading
+    order: a meaningful vertical gap, a column jump, or a return to the top of
+    a page starts a new block.  It deliberately does *not* invent figure
+    descriptions or a speculative visual reading order.
+    """
     lines = page.get("ocr_lines", [])
     if not lines:
         return structured_parts_with_spans(page.get("text", ""), artifacts)
@@ -386,19 +423,29 @@ def ocr_parts_with_geometry(page: dict[str, Any], artifacts: set[str]) -> list[d
     for index, line in enumerate(lines):
         text = str(line.get("text", "")).strip()
         if not text or normalise_artifact(text) in artifacts:
-            flush(); previous_box = None; continue
+            flush()
+            previous_box = None
+            continue
         if is_numeric_source_marker(text):
-            flush(); page.setdefault("numeric_source_markers", []).append({"text": text, "bbox": box_for(line)}); previous_box = None; continue
+            flush()
+            page.setdefault("numeric_source_markers", []).append({"text": text, "bbox": box_for(line)})
+            previous_box = None
+            continue
         current_box = box_for(line)
         if current and current_box and previous_box:
             previous_height = float(previous_box["y1"]) - float(previous_box["y0"])
             current_height = float(current_box["y1"]) - float(current_box["y0"])
+            # Vision coordinates have a bottom-left origin.  A large positive
+            # gap means the next line visibly begins below the prior one.  A
+            # large upward jump is a reliable signal that a new column/page
+            # region has begun.
             vertical_gap = float(previous_box["y0"]) - float(current_box["y1"])
             moved_upward = float(current_box["y0"]) > float(previous_box["y0"]) + max(0.035, 2.0 * previous_height)
             changed_column = abs(float(current_box["x0"]) - float(previous_box["x0"])) > 0.26 and abs(vertical_gap) > max(0.01, previous_height)
             if vertical_gap > max(0.025, 1.45 * max(previous_height, current_height)) or moved_upward or changed_column:
                 flush()
-        current.append((index, line)); previous_box = current_box
+        current.append((index, line))
+        previous_box = current_box
     flush()
     return parts or structured_parts_with_spans(page.get("text", ""), artifacts)
 
@@ -436,6 +483,14 @@ def geometric_native_parts(page: dict[str, Any], artifacts: set[str]) -> list[di
             # A larger-than-leading gap is source evidence of a new paragraph.
             if vertical_gap > max(10.0, 1.15 * max(prior_height, current_height)):
                 flush()
+        # So is a change of face. A heading is set closer to the text it heads
+        # than to the text above it, so the gap rule alone never separates one:
+        # on a two-column paper every inter-line gap is smaller than the 10pt
+        # floor, and the heading is absorbed into the paragraph beneath it and
+        # ceases to exist as structure. The face the page sets a line in is
+        # measured source evidence of the same kind as its position.
+        if current and line.get("font") and prior and prior.get("font") and line["font"] != prior["font"]:
+            flush()
         current.append(line)
     flush()
     return parts or structured_parts_with_spans(page["text"], artifacts)
@@ -487,6 +542,17 @@ def native_health(text: str) -> dict[str, Any]:
     replacement = text.count("\ufffd")
     control = sum(1 for char in text if ord(char) < 32 and char not in "\n\t\r")
     invisible = sum(1 for char in text if char in {"\u200b", "\u200c", "\u200d", "\u2060", "\ufeff"})
+    # Counted separately from `invisible`: a noncharacter is a broken font
+    # mapping in the source, not a hidden instruction, and it is resolved in the
+    # reading form rather than being grounds to distrust the whole page.
+    discardable = count_discardable_formatting(text)
+    # A private-use character is a real glyph the PDF's font never mapped to
+    # Unicode -- Adobe writes the registered sign at U+F6D9, and a maths font
+    # commonly puts its own brackets in the E000 block. Philon cannot know what
+    # one means, so it neither deletes it (that would lose text) nor guesses at
+    # it (that would invent text). It is counted, and the record says so.
+    private_use = sum(1 for char in text if 0xE000 <= ord(char) <= 0xF8FF
+                      or 0xF0000 <= ord(char) <= 0xFFFFD or 0x100000 <= ord(char) <= 0x10FFFD)
     alphanumeric = sum(char.isalnum() for char in text)
     punctuation = sum(not char.isalnum() and not char.isspace() for char in text)
     repeated_lines: dict[str, int] = {}
@@ -508,6 +574,8 @@ def native_health(text: str) -> dict[str, Any]:
         confidence = 0.65
     return {
         "native_text_present": bool(visible),
+        "discardable_formatting_characters": discardable,
+        "private_use_characters": private_use,
         "replacement_characters": replacement,
         "control_characters": control,
         "invisible_characters": invisible,
@@ -554,6 +622,71 @@ def source_bbox_for_block(page: dict[str, Any], text: str, start: int | None, en
     return union_bboxes(line_boxes)
 
 
+#: A face whose name carries one of these is set bolder than its family's text
+#: weight. The name is used rather than PDFium's flags because a subset font
+#: often declares no flags at all while still being named for its weight.
+BOLD_FACE = re.compile(r"(?:bold|black|heavy|semibold|-bd\b|,bold)", re.IGNORECASE)
+#: How many characters of a line to sample when naming the face it is set in.
+#: A line is typographically uniform in the ordinary case, and sampling keeps a
+#: dense page from costing one FFI call per character.
+FACE_SAMPLE = 16
+
+
+def line_typeface(textpage: Any, start: int, length: int, text: str) -> tuple[str, float]:
+    """Name the face a measured line is set in, and its type size.
+
+    PDFium already knows both; Philon previously inferred size from glyph
+    bounding boxes, which inverts on a line with no descender -- a heading in
+    larger type can measure *shorter* than the body text around it. The face
+    name is the more portable of the two signals: FPDFText_GetFontSize returns
+    1.0 whenever a PDF scales type through the text matrix instead of the Tf
+    operand, which is the case for many publisher PDFs.
+    """
+    try:
+        import pypdfium2.raw as raw  # type: ignore
+    except ImportError:
+        return "", 0.0
+    indexes = [index for index in range(start, min(start + length, len(text))) if not text[index].isspace()]
+    if not indexes:
+        return "", 0.0
+    step = max(1, len(indexes) // FACE_SAMPLE)
+    sampled = indexes[::step][:FACE_SAMPLE]
+    faces: dict[str, int] = {}
+    sizes: list[float] = []
+    buffer = ctypes.create_string_buffer(160)
+    flags = ctypes.c_int()
+    for index in sampled:
+        try:
+            written = raw.FPDFText_GetFontInfo(textpage, index, buffer, 160, ctypes.byref(flags))
+            name = buffer.raw[:max(0, written - 1)].decode("utf-8", "replace")
+            sizes.append(float(raw.FPDFText_GetFontSize(textpage, index)))
+        except Exception:
+            return "", 0.0
+        faces[name] = faces.get(name, 0) + 1
+    face = max(faces.items(), key=lambda item: item[1])[0] if faces else ""
+    return face, statistics.median(sizes) if sizes else 0.0
+
+
+def document_body_typeface(source_pages: list[dict[str, Any]]) -> tuple[str, float]:
+    """The face and size most of this document's measured text is set in.
+
+    Taken across the whole document rather than per page, because a page can be
+    mostly heading, mostly caption or mostly figure, and a per-page answer would
+    then call the body text unusual.
+    """
+    faces: dict[str, int] = {}
+    sizes: list[float] = []
+    for page in source_pages:
+        for line in page.get("native_text_lines", []):
+            face = line.get("font")
+            if face:
+                faces[face] = faces.get(face, 0) + len(line.get("text", ""))
+            if line.get("size"):
+                sizes.append(float(line["size"]))
+    face = max(faces.items(), key=lambda item: item[1])[0] if faces else ""
+    return face, statistics.median(sizes) if sizes else 0.0
+
+
 def pdfium_extract(path: Path) -> tuple[list[dict[str, Any]], list[WarningRecord]]:
     """Use PDFium first, preserving a pypdf fallback for non-packaged tests."""
     warnings: list[WarningRecord] = []
@@ -583,7 +716,8 @@ def pdfium_extract(path: Path) -> tuple[list[dict[str, Any]], list[WarningRecord
                 if start < 0 or end > len(text):
                     continue
                 bbox = pdfium_span_bbox(textpage, line_start, len(line_text))
-                line_spans.append({"text": line_text, "start": start, "end": end, "bbox": bbox})
+                face, size = line_typeface(textpage, line_start, len(line_text), extracted_text)
+                line_spans.append({"text": line_text, "start": start, "end": end, "bbox": bbox, "font": face, "size": size})
                 spans.append({"start": start, "end": end, "bbox": bbox})
             pages.append({
                 "number": index + 1, "width": width, "height": height, "text": text,
@@ -764,16 +898,32 @@ def ocr_textless_pdf_pages(path: Path, pages: list[dict[str, Any]], profile: str
 #: rather than chosen: a subheading is commonly 1.15x body text, so the gate
 #: sits above that to keep emphasis from being read as structure.
 HEADING_PROMINENCE = 1.25
+#: A heading set in its own face may wrap, but not far. Beyond this it is a
+#: bold lead-in sentence or an emphasised paragraph, not a section title.
+HEADING_FACE_LINES = 2
+HEADING_FACE_CHARS = 120
 
 
-def classify_block(text: str, prominence: float | None = None) -> tuple[str, int | None]:
-    """Name a block from its text, and from how large that text is set.
+def heading_depth(first_line: str) -> int:
+    """Read a heading's level from its own section number, else default to 2."""
+    number = re.match(r"^(\d+(?:\.\d+)*)", first_line)
+    return min(6, number.group(1).count(".") + 1) if number else 2
+
+
+def classify_block(text: str, prominence: float | None = None, typeface: dict[str, Any] | None = None) -> tuple[str, int | None]:
+    """Name a block from its text, and from how the page sets that text.
 
     `prominence` is the block's line height against the page's median line
     height, where the page measured it. A heading is a line of its own, because
     the first line of ordinary prose looks exactly like one; a title that wraps
     is only readable as a heading when the page shows it set larger than the
     body text around it.
+
+    `typeface` is what PDFium says the block is actually set in: whether its
+    face differs from the document's body face, and whether that face is a bold
+    one. This is what lets a heading be recognised in a script the text rules
+    cannot read, and it is measured rather than inferred -- unlike line height,
+    which a heading without descenders makes *smaller* than the body text.
     """
     first_line = text.splitlines()[0] if text else ""
     line_count = len([line for line in text.splitlines() if line.strip()])
@@ -791,8 +941,16 @@ def classify_block(text: str, prominence: float | None = None) -> tuple[str, int
     # and ends mid-clause rather than with a full stop.
     prominent = prominence is not None and prominence >= HEADING_PROMINENCE and line_count <= 3
     if (line_count == 1 or prominent) and re.match(r"^(?:\d+(?:\.\d+)*\s+)?[A-Z][A-Za-z0-9 ,:;()/-]{3,}$", first_line) and len(first_line) < 100:
-        depth = min(6, first_line.count(".") + 1) if re.match(r"^\d+", first_line) else 2
-        return "heading", depth
+        return "heading", heading_depth(first_line)
+    # A run the page sets in a different, bolder face than the body text is a
+    # heading whatever alphabet it is written in. The text rules above are
+    # ASCII-Latin only, so without this a Greek, Cyrillic or accented heading
+    # could never be one; and they demand no terminal punctuation, so a heading
+    # ending in '?', '&' or a full stop could not be one either.
+    if typeface and typeface.get("differs_from_body") and typeface.get("bold") and line_count <= HEADING_FACE_LINES:
+        stripped = text.strip()
+        if 0 < len(stripped) <= HEADING_FACE_CHARS and not stripped.endswith((".", ";")):
+            return "heading", heading_depth(first_line)
     return "paragraph", None
 
 
@@ -862,8 +1020,47 @@ def block_prominence(page: dict[str, Any], start: int | None, end: int | None) -
     return statistics.median(block_heights) / page_median if page_median > 0 else None
 
 
+def block_typeface(page: dict[str, Any], start: int | None, end: int | None) -> dict[str, Any] | None:
+    """What face this block is set in, against the document's body face.
+
+    Returns None where the face was never measured -- an OCR page, the pypdf
+    fallback, or a build of PDFium without the font call -- so a caller keeps
+    exactly the behaviour it had before the face was available.
+    """
+    if start is None or end is None:
+        return None
+    body_face = page.get("body_font")
+    if not body_face:
+        return None
+    faces: dict[str, int] = {}
+    for line in page.get("native_text_lines", []):
+        face = line.get("font")
+        if face and line.get("start", -1) < end and line.get("end", -1) > start:
+            faces[face] = faces.get(face, 0) + len(str(line.get("text", "")))
+    if not faces:
+        return None
+    face = max(faces.items(), key=lambda item: item[1])[0]
+    return {
+        "face": face,
+        "differs_from_body": face != body_face,
+        "bold": bool(BOLD_FACE.search(face)) or _is_bolder_sibling(face, body_face),
+    }
+
+
+def _is_bolder_sibling(face: str, body_face: str) -> bool:
+    """True for a face that is the body face plus a weight suffix.
+
+    Subset fonts are often named by suffix rather than by word: a document set
+    in `LinLibertineT` sets its headings in `LinLibertineTB`. The word-based
+    test cannot see that, and a bare "is it different" test would call every
+    italic and every small-caps face a heading.
+    """
+    return bool(body_face) and face != body_face and face.startswith(body_face) and face[len(body_face):].upper() in {"B", "BD", "-B", "-BD"}
+
+
 def make_block(page: dict[str, Any], ordinal: int, text: str, start: int | None = None, end: int | None = None, ocr_line_indexes: list[int] | None = None) -> dict[str, Any]:
-    kind, level = classify_block(text, prominence=block_prominence(page, start, end))
+    typeface = block_typeface(page, start, end)
+    kind, level = classify_block(text, prominence=block_prominence(page, start, end), typeface=typeface)
     health = native_health(text)
     page_id = f"page-{page['number']}"
     block_id = f"{page_id}-block-{ordinal}"
@@ -1010,6 +1207,8 @@ def verified_checks(pages: list[dict[str, Any]], blocks: list[dict[str, Any]]) -
         health = page.get("route", {}).get("native_text_health", {})
         if health.get("invisible_characters", 0):
             findings.append(WarningRecord("INVISIBLE_TEXT_SUSPECTED", "Verified found zero-width characters in native text. The source text is retained unchanged; inspect this page before reuse.", page=page["number"]))
+        if health.get("private_use_characters", 0):
+            findings.append(WarningRecord("PRIVATE_USE_CHARACTERS", f"Verified found {health['private_use_characters']} character(s) this PDF's fonts never mapped to Unicode. They are retained exactly as extracted; Philon did not guess what they represent, so this page needs review before machine reuse.", page=page["number"]))
         if health.get("duplicate_source_line_count", 0) >= 3:
             findings.append(WarningRecord("DUPLICATE_SOURCE_LINES", "Verified found repeated native lines on this page. They may be intentional source content or overlapping/invisible PDF text; Philon retained them for review.", page=page["number"]))
         if page["method"] in {"pdfium-native", "apple-vision-ocr"}:
@@ -1044,6 +1243,9 @@ def make_ir(path: Path, profile: str) -> tuple[dict[str, Any], list[WarningRecor
     else:
         source_pages, warnings = image_extract(path, profile)
 
+    body_face, body_size = document_body_typeface(source_pages)
+    for source_page in source_pages:
+        source_page["body_font"], source_page["body_size"] = body_face, body_size
     artifacts = repeated_page_artifacts(source_pages)
     pages: list[dict[str, Any]] = []
     blocks: list[dict[str, Any]] = []
@@ -1102,11 +1304,134 @@ def make_ir(path: Path, profile: str) -> tuple[dict[str, Any], list[WarningRecor
     return ir, warnings, [Timing("native-extraction", round((time.perf_counter() - started) * 1000))]
 
 
-def render_markdown(ir: dict[str, Any]) -> str:
+def is_discardable_formatting(character: str) -> bool:
+    """True for a character that carries layout, never a word.
+
+    Two families. The zero-width joiners and the soft hyphen are legitimate
+    formatting a reader is not meant to see. The Unicode *noncharacters* --
+    U+FDD0..U+FDEF and U+nFFFE/U+nFFFF in every plane -- are permanently
+    reserved and are never valid in interchange; PDFium hands them over where a
+    PDF's font maps a hyphenation point to an unassigned slot. Either way the
+    character belongs to the layout, so it is dropped from the reading form and
+    retained verbatim in `text`.
+    """
+    code = ord(character)
+    if character in {"\u00ad", "\u200b", "\u200c", "\u200d", "\u2060", "\ufeff"}:
+        return True
+    if 0xFDD0 <= code <= 0xFDEF:
+        return True
+    return code & 0xFFFE == 0xFFFE
+
+
+def count_discardable_formatting(text: str) -> int:
+    return sum(1 for character in text if is_discardable_formatting(character))
+
+
+def clean_reading_text(text: str) -> str:
+    """Reflow measured source lines without changing their words or meaning.
+
+    Whitespace, safe line-end hyphenation, and characters that carry layout
+    rather than meaning. A noncharacter left in place corrupts the word it sits
+    inside -- `de<U+FFFE>picted` -- and makes the output invalid UTF-8 for a
+    strict consumer, so it is resolved here and never in `text`.
+    """
+    measured: list[tuple[str, bool]] = []
+    for raw_line in text.splitlines():
+        stripped = raw_line.strip()
+        if not stripped:
+            continue
+        # A discardable character at the end of a line is a hyphenation point,
+        # exactly as a trailing "-" is; anywhere else it simply vanishes.
+        hyphenates = is_discardable_formatting(stripped[-1])
+        body = "".join(character for character in stripped if not is_discardable_formatting(character))
+        if body:
+            measured.append((body, hyphenates))
+    if not measured:
+        return ""
+    joined: list[str] = [measured[0][0]]
+    pending_hyphen = measured[0][1]
+    for body, hyphenates in measured[1:]:
+        continues = bool(re.match(r"^[a-z][A-Za-z'-]*\b", body))
+        if continues and pending_hyphen:
+            joined[-1] = joined[-1] + body
+        elif continues and re.search(r"[A-Za-z]{2,}-$", joined[-1]):
+            joined[-1] = joined[-1][:-1] + body
+        else:
+            joined.append(body)
+        pending_hyphen = hyphenates
+    return re.sub(r"\s+", " ", " ".join(joined)).strip()
+
+
+def source_page_number(ir: dict[str, Any], page_id: str) -> int | None:
+    page = next((item for item in ir.get("pages", []) if item.get("id") == page_id), None)
+    return int(page["number"]) if isinstance(page, dict) and isinstance(page.get("number"), int) else None
+
+
+def native_images_by_page(ir: dict[str, Any]) -> dict[int, list[dict[str, Any]]]:
+    """Group the extracted source images by the page each was drawn on."""
+    grouped: dict[int, list[dict[str, Any]]] = {}
+    for image in ir.get("document_artifacts", {}).get("native_images", []):
+        for page_number in image.get("source_pages", []) or []:
+            if isinstance(page_number, int):
+                grouped.setdefault(page_number, []).append(image)
+    return grouped
+
+
+def markdown_page_images(grouped: dict[int, list[dict[str, Any]]], page_number: int | None) -> list[str]:
+    """Reference one page's source images, naming them rather than describing them.
+
+    The alt text identifies the asset and says a description is owed. Philon
+    does not look at the image, so it must not write what is in it.
+    """
+    images = grouped.get(page_number or -1) or []
+    if not images:
+        return []
     lines: list[str] = []
+    for image in images:
+        asset_id = str(image.get("id", "source-image"))
+        relative_path = str(image.get("relative_path", ""))
+        if not relative_path:
+            continue
+        width, height = image.get("pixel_width"), image.get("pixel_height")
+        dimensions = f" · {width} × {height}px" if width and height else ""
+        lines.extend([
+            f"![Extracted source image {asset_id}; source page {page_number}; visual description requires review.]({relative_path})",
+            f"_Evidence: native PDF image {asset_id} · source page {page_number}{dimensions} · extraction native-pdf-image-stream._",
+            "",
+        ])
+    return lines
+
+
+def render_markdown(ir: dict[str, Any]) -> str:
+    """Render clean, portable Markdown for reading and for machine ingestion.
+
+    The canonical machine package retains line-level provenance. This layer is
+    intentionally simple: source-page markers remain available as comments, and
+    each page's extracted source images are referenced where that page ends.
+
+    They are grouped by page rather than composed into figures, because Philon
+    extracts embedded image streams and does not infer which of them make up one
+    figure. A photomosaic paper embeds dozens of images inside a single printed
+    figure; claiming a figure grouping would be inventing structure. The page is
+    what the source proves, so the page is what is stated.
+    """
+    lines: list[str] = []
+    document_name = str(ir.get("document", {}).get("source", {}).get("filename", "Philon document"))
+    lines.extend(["---", f"title: {document_name}", "generated_by: Philon 0.2", "---", ""])
+    images_by_page = native_images_by_page(ir)
+    current_page: str | None = None
     for block in ir["blocks"]:
+        if block.get("page") != current_page:
+            lines.extend(markdown_page_images(images_by_page, source_page_number(ir, current_page) if current_page else None))
+            current_page = str(block.get("page"))
+            page_number = source_page_number(ir, current_page)
+            if page_number is not None:
+                lines.extend([f"<!-- Philon source page {page_number} -->", ""])
+        text = clean_reading_text(str(block.get("text", "")))
+        if not text:
+            continue
         if block["type"] == "heading":
-            lines.extend(["#" * (block["level"] or 2) + " " + block["text"], ""])
+            lines.extend(["#" * (block["level"] or 2) + " " + text, ""])
         elif block["type"] == "table" and table_rows(block["text"]):
             rows = table_rows(block["text"]) or []
             lines.append("| " + " | ".join(rows[0]) + " |")
@@ -1114,158 +1439,133 @@ def render_markdown(ir: dict[str, Any]) -> str:
             lines.extend("| " + " | ".join(row) + " |" for row in rows[1:])
             lines.append("")
         elif block["type"] == "formula":
-            lines.extend(["```text", block["text"], "```", ""])
-        else:
-            lines.extend([block["text"], ""])
-    native_images = ir.get("document_artifacts", {}).get("native_images", [])
-    if native_images:
-        lines.extend(["## Extracted source images", ""])
-        for image in native_images:
-            pages = ", ".join(str(page) for page in image.get("source_pages", [])) or "unknown"
-            asset_id = image.get("id", "source image")
-            relative_path = image.get("relative_path", "")
-            width, height = image.get("pixel_width"), image.get("pixel_height")
-            dimensions = f" · {width} × {height}px" if width and height else ""
-            # This deliberately identifies the asset rather than inventing visual alt text.
-            lines.extend([
-                f"![Extracted source image {asset_id}; pages {pages}; visual description requires review.]({relative_path})",
-                f"_Evidence: native PDF image {asset_id} · source page(s) {pages}{dimensions} · visual description requires review._",
-                "",
-            ])
-    return "\n".join(lines).strip() + "\n"
-
-
-def render_html(ir: dict[str, Any]) -> str:
-    body: list[str] = []
-    for block in ir["blocks"]:
-        source = block["source"]
-        attrs = f'data-philon-id="{block["id"]}" data-philon-page="{block["page"]}" data-philon-confidence="{source["confidence"]}"'
-        content = html.escape(block["text"]).replace("\n", "<br />")
-        if block["type"] == "heading":
-            body.append(f'<h{block["level"] or 2} {attrs}>{content}</h{block["level"] or 2}>')
-        elif block["type"] == "table" and table_rows(block["text"]):
-            rows = table_rows(block["text"]) or []
-            header = "<thead><tr>" + "".join(f"<th scope=\"col\">{html.escape(cell)}</th>" for cell in rows[0]) + "</tr></thead>"
-            body_rows = "".join("<tr>" + "".join(f"<td>{html.escape(cell)}</td>" for cell in row) + "</tr>" for row in rows[1:])
-            body.append("<table " + attrs + ">" + header + "<tbody>" + body_rows + "</tbody></table>")
-        elif block["type"] == "formula":
-            body.append(f"<pre {attrs}><code>{content}</code></pre>")
+            lines.extend(["```text", text, "```", ""])
         elif block["type"] == "caption":
-            body.append(f"<figcaption {attrs}>{content}</figcaption>")
+            lines.extend([f"> {text}", ""])
         else:
-            body.append(f"<p {attrs}>{content}</p>")
-    native_images = ir.get("document_artifacts", {}).get("native_images", [])
-    if native_images:
-        body.append("<section data-philon-artifact-section=\"native-images\"><h2>Extracted source images</h2>")
-        for image in native_images:
-            pages = ", ".join(str(page) for page in image.get("source_pages", [])) or "unknown"
-            asset_id = str(image.get("id", "source-image"))
-            relative_path = html.escape(str(image.get("relative_path", "")), quote=True)
-            alt = html.escape(f"Extracted source image {asset_id}; source page(s) {pages}; visual description requires review.", quote=True)
-            dimensions = ""
-            if image.get("pixel_width") and image.get("pixel_height"):
-                dimensions = f" · {image['pixel_width']} × {image['pixel_height']}px"
-            body.append(
-                f'<figure data-philon-asset-id="{html.escape(asset_id, quote=True)}" '
-                f'data-philon-source-pages="{html.escape(pages, quote=True)}" '
-                'data-philon-extraction-method="native-pdf-image">'
-                f'<img src="{relative_path}" alt="{alt}" />'
-                f'<figcaption>Extracted native PDF image {html.escape(asset_id)} · source page(s) {html.escape(pages)}{dimensions} · visual description requires review.</figcaption>'
-                "</figure>"
-            )
-        body.append("</section>")
-    return "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\" /><title>Philon export</title></head><body><main>" + "\n".join(body) + "</main></body></html>\n"
-
-
-def clean_reading_text(text: str) -> str:
-    lines = [line.strip() for line in text.splitlines() if line.strip()]
-    joined: list[str] = []
-    for line in lines:
-        if joined and re.search(r"[A-Za-z]{2,}-$", joined[-1]) and re.match(r"^[a-z][A-Za-z'-]*\b", line):
-            joined[-1] = joined[-1][:-1] + line
-        else:
-            joined.append(line)
-    return re.sub(r"\s+", " ", " ".join(joined)).strip()
-
-
-def render_markdown(ir: dict[str, Any]) -> str:
-    """Clean Markdown for reading and text apps; provenance remains in machine/."""
-    name = str(ir.get("document", {}).get("source", {}).get("filename", "Philon document"))
-    pages = {str(page.get("id")): page.get("number") for page in ir.get("pages", [])}
-    lines = ["---", f"title: {name}", "generated_by: Philon 0.2", "---", ""]
-    current = None
-    for block in ir.get("blocks", []):
-        if block.get("page") != current:
-            current = block.get("page")
-            if (number := pages.get(str(current))) is not None:
-                lines.extend([f"<!-- Philon source page {number} -->", ""])
-        text = clean_reading_text(str(block.get("text", "")))
-        if not text:
-            continue
-        if block.get("type") == "heading": lines.extend(["#" * (block.get("level") or 2) + " " + text, ""])
-        elif block.get("type") == "table" and table_rows(str(block.get("text", ""))):
-            rows = table_rows(str(block.get("text", ""))) or []
-            lines.append("| " + " | ".join(rows[0]) + " |"); lines.append("| " + " | ".join("---" for _ in rows[0]) + " |")
-            lines.extend("| " + " | ".join(row) + " |" for row in rows[1:]); lines.append("")
-        elif block.get("type") == "caption": lines.extend([f"> {text}", ""])
-        elif block.get("type") == "formula": lines.extend(["```text", text, "```", ""])
-        else: lines.extend([text, ""])
+            lines.extend([text, ""])
+    lines.extend(markdown_page_images(images_by_page, source_page_number(ir, current_page) if current_page else None))
     return "\n".join(lines).strip() + "\n"
 
 
 def render_html(ir: dict[str, Any], include_facsimiles: bool = False) -> str:
-    """Text-first responsive HTML with source pages available in place."""
-    name = str(ir.get("document", {}).get("source", {}).get("filename", "Philon document"))
-    by_page: dict[str, list[dict[str, Any]]] = {}
+    """Render a standalone, responsive presentation document.
+
+    It is text-first for ordinary reading, with each original page available in
+    place inside a disclosure control.  This avoids the old end-of-document
+    image dump while preserving a truthful route back to the source.
+    """
+    body: list[str] = []
+    blocks_by_page: dict[str, list[dict[str, Any]]] = {}
     for block in ir.get("blocks", []):
-        by_page.setdefault(str(block.get("page")), []).append(block)
-    body = [f"<header><p>Philon 0.2 presentation export</p><h1>{html.escape(name)}</h1></header><main>"]
+        blocks_by_page.setdefault(str(block.get("page")), []).append(block)
+    title = str(ir.get("document", {}).get("source", {}).get("filename", "Philon document"))
+    body.extend([f"<header class=\"philon-document-header\"><p>Philon 0.2 presentation export</p><h1>{html.escape(title)}</h1><span>Local, source-linked conversion</span></header>", "<main>"])
     pages = list(ir.get("pages", []))
     if not pages:
-        seen = []
+        seen_page_ids: list[str] = []
         for block in ir.get("blocks", []):
             page_id = str(block.get("page", "page-1"))
-            if page_id not in seen: seen.append(page_id)
-        pages = [{"id": page_id, "number": index + 1} for index, page_id in enumerate(seen)]
+            if page_id not in seen_page_ids:
+                seen_page_ids.append(page_id)
+        pages = [{"id": page_id, "number": index + 1} for index, page_id in enumerate(seen_page_ids)]
     for page in pages:
-        page_id, number = str(page.get("id")), int(page.get("number") or 0)
-        body.append(f'<section id="source-page-{number}"><small>Source page {number}</small>')
+        page_id = str(page.get("id"))
+        page_number = int(page.get("number") or 0)
+        body.append(f'<section class="philon-page" id="source-page-{page_number}" data-philon-page="{page_id}">')
+        body.append(f'<div class="philon-page-label">Source page {page_number}</div>')
         if include_facsimiles:
-            body.append(f'<details><summary>Show original page</summary><img src="assets/page-previews/page-{number:04}.png" alt="Original source page {number}; consult it to verify visual layout and figures." loading="lazy" /></details>')
-        for block in by_page.get(page_id, []):
-            text = html.escape(clean_reading_text(str(block.get("text", ""))))
-            if not text: continue
-            attrs = f'data-philon-id="{block["id"]}" data-philon-page="{page_id}"'
-            if block.get("type") == "heading": body.append(f'<h{block.get("level") or 2} {attrs}>{text}</h{block.get("level") or 2}>')
-            elif block.get("type") == "table" and table_rows(str(block.get("text", ""))):
-                rows = table_rows(str(block.get("text", ""))) or []
+            preview = f"assets/page-previews/page-{page_number:04}.png"
+            body.append(f'<details class="philon-facsimile"><summary>Show original page</summary><img src="{preview}" alt="Original source page {page_number}; consult it to verify visual layout and figures." loading="lazy" /></details>')
+        for block in blocks_by_page.get(page_id, []):
+            source = block["source"]
+            attrs = f'data-philon-id="{block["id"]}" data-philon-page="{block["page"]}" data-philon-confidence="{source["confidence"]}"'
+            content = html.escape(clean_reading_text(str(block.get("text", ""))))
+            if not content:
+                continue
+            if block["type"] == "heading":
+                body.append(f'<h{block["level"] or 2} {attrs}>{content}</h{block["level"] or 2}>')
+            elif block["type"] == "table" and table_rows(block["text"]):
+                rows = table_rows(block["text"]) or []
                 header = "<thead><tr>" + "".join(f"<th scope=\"col\">{html.escape(cell)}</th>" for cell in rows[0]) + "</tr></thead>"
-                contents = "".join("<tr>" + "".join(f"<td>{html.escape(cell)}</td>" for cell in row) + "</tr>" for row in rows[1:])
-                body.append("<table " + attrs + ">" + header + "<tbody>" + contents + "</tbody></table>")
-            elif block.get("type") == "caption": body.append(f'<p class="caption" {attrs}>{text}</p>')
-            else: body.append(f'<p {attrs}>{text}</p>')
+                body_rows = "".join("<tr>" + "".join(f"<td>{html.escape(cell)}</td>" for cell in row) + "</tr>" for row in rows[1:])
+                body.append("<table " + attrs + ">" + header + "<tbody>" + body_rows + "</tbody></table>")
+            elif block["type"] == "formula":
+                body.append(f"<pre {attrs}><code>{content}</code></pre>")
+            elif block["type"] == "caption":
+                body.append(f"<p class=\"philon-caption\" {attrs}>{content}</p>")
+            else:
+                body.append(f"<p {attrs}>{content}</p>")
         body.append("</section>")
     body.append("</main>")
-    style = "body{margin:0;background:#f5f3ee;color:#1d1d1f;font:18px/1.65 Georgia,serif}header,main{max-width:46rem;margin:auto;padding:2rem 1.5rem}header{padding-top:5rem}h1{font-size:clamp(2rem,6vw,4rem);line-height:1.05}section{border-top:1px solid #d8d3cb;padding:2rem 0}small,header p{font:600 .72rem system-ui;color:#777;letter-spacing:.1em;text-transform:uppercase}details{margin:1rem 0;font-family:system-ui}summary{cursor:pointer;color:#735d44}img{display:block;width:100%;margin-top:1rem}.caption{font-style:italic;color:#6d6259}"
-    return f'<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>{html.escape(name)}</title><style>{style}</style></head><body>' + "\n".join(body) + "</body></html>\n"
+    stylesheet = """
+    :root { color: #1d1d1f; background: #f5f3ee; font-family: Iowan Old Style, Charter, Georgia, serif; }
+    body { margin: 0; line-height: 1.65; }
+    .philon-document-header { max-width: 46rem; margin: 0 auto; padding: 5rem 1.5rem 2.5rem; }
+    .philon-document-header p, .philon-page-label { color: #77716a; font: 600 .72rem/1.2 ui-sans-serif, system-ui, sans-serif; letter-spacing: .11em; text-transform: uppercase; }
+    h1 { font-size: clamp(2.2rem, 6vw, 4.4rem); line-height: 1.03; letter-spacing: -.045em; margin: .35rem 0 1rem; }
+    .philon-document-header span { color: #5d5b57; }
+    main { max-width: 46rem; margin: 0 auto; padding: 0 1.5rem 6rem; }
+    .philon-page { border-top: 1px solid #d8d3cb; padding: 2.2rem 0 2.8rem; }
+    .philon-page > :last-child { margin-bottom: 0; }
+    .philon-page h2, .philon-page h3 { line-height: 1.15; margin: 1.8em 0 .55em; }
+    .philon-page p { margin: 0 0 1em; }
+    .philon-caption { color: #6d6259; font-size: .93em; font-style: italic; }
+    .philon-facsimile { margin: .5rem 0 1.5rem; font-family: ui-sans-serif, system-ui, sans-serif; }
+    .philon-facsimile summary { cursor: pointer; color: #735d44; font-size: .88rem; }
+    .philon-facsimile img { display: block; width: 100%; margin-top: .85rem; border: 1px solid #d8d3cb; background: white; }
+    table { width: 100%; border-collapse: collapse; margin: 1.25rem 0; font-size: .94em; }
+    th, td { padding: .5rem; text-align: left; vertical-align: top; border-bottom: 1px solid #d8d3cb; }
+    pre { overflow: auto; padding: 1rem; background: #eeeae3; }
+    @media (prefers-color-scheme: dark) { :root { color: #f3f0ea; background: #1d1b19; } .philon-document-header p, .philon-page-label, .philon-document-header span, .philon-caption { color: #c8c0b6; } .philon-page { border-color: #47423d; } .philon-facsimile summary { color: #ddbd91; } th, td { border-color: #47423d; } pre { background: #302c28; } }
+    """
+    return "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\" /><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" /><title>" + html.escape(title) + "</title><style>" + stylesheet + "</style></head><body>" + "\n".join(body) + "</body></html>\n"
+
+
+def machine_block_record(block: dict[str, Any], page_number: int | None) -> dict[str, Any]:
+    """Make a compact, schema-stable record for parsers and databases."""
+    return {
+        "id": block.get("id"), "page_id": block.get("page"), "page_number": page_number,
+        "type": block.get("type"), "level": block.get("level"),
+        "text": block.get("text", ""), "reading_text": clean_reading_text(str(block.get("text", ""))),
+        "bbox": block.get("bbox"), "source": block.get("source"), "evidence": block.get("evidence"), "review": block.get("review"),
+    }
 
 
 def write_machine_package(ir: dict[str, Any], output_dir: Path) -> Path:
-    root, pages_dir = output_dir / "machine", output_dir / "machine" / "pages"
-    numbers = {str(page.get("id")): page.get("number") for page in ir.get("pages", [])}
-    records = [{"id": block.get("id"), "page_id": block.get("page"), "page_number": numbers.get(str(block.get("page"))), "type": block.get("type"), "level": block.get("level"), "text": block.get("text", ""), "reading_text": clean_reading_text(str(block.get("text", ""))), "bbox": block.get("bbox"), "source": block.get("source"), "evidence": block.get("evidence"), "review": block.get("review")} for block in ir.get("blocks", [])]
-    atomic_write_text(root / "blocks.ndjson", "".join(json.dumps(record, ensure_ascii=False) + "\n" for record in records))
-    atomic_write_text(root / "reading-order.json", json.dumps({"schema_version": "1.0", "items": [{"page_id": page.get("id"), "page_number": page.get("number"), "block_ids": page.get("block_ids", [])} for page in ir.get("pages", [])]}, indent=2, ensure_ascii=False))
+    """Write Philon's compact, lossless machine package beside human exports."""
+    root = output_dir / "machine"
+    pages_dir = root / "pages"
+    page_numbers = {str(page.get("id")): int(page["number"]) for page in ir.get("pages", []) if isinstance(page.get("number"), int)}
+    records = [machine_block_record(block, page_numbers.get(str(block.get("page")))) for block in ir.get("blocks", [])]
+    reading_order = [{"page_id": page.get("id"), "page_number": page.get("number"), "block_ids": page.get("block_ids", [])} for page in ir.get("pages", [])]
+    package = {
+        "schema_version": "philon-machine-package/1.0", "document": ir.get("document", {}),
+        "files": {"blocks": "blocks.ndjson", "reading_order": "reading-order.json", "pages": "pages/", "assets": "assets.json", "evidence": "../" + safe_slug(Path(str(ir.get("document", {}).get("source", {}).get("filename", "document"))).stem) + ".evidence.json"},
+        "guarantees": ["source text is retained in blocks.ndjson", "reading_text changes whitespace, safe line-end hyphenation and characters that carry layout rather than meaning", "geometry and uncertainty remain explicit", "visual descriptions are never inferred"],
+    }
+    atomic_write_text(root / "package.json", json.dumps(package, indent=2, ensure_ascii=False))
+    atomic_write_text(root / "reading-order.json", json.dumps({"schema_version": "1.0", "items": reading_order}, indent=2, ensure_ascii=False))
     atomic_write_text(root / "assets.json", json.dumps({"schema_version": "1.0", "native_images": ir.get("document_artifacts", {}).get("native_images", [])}, indent=2, ensure_ascii=False))
+    atomic_write_text(root / "blocks.ndjson", "".join(json.dumps(record, ensure_ascii=False) + "\n" for record in records))
     for page in ir.get("pages", []):
-        number, page_id = int(page.get("number") or 0), str(page.get("id")); page_records = [record for record in records if record["page_id"] == page_id]
-        atomic_write_text(pages_dir / f"page-{number:04}.json", json.dumps({"schema_version": "1.0", "page": page, "blocks": page_records}, indent=2, ensure_ascii=False))
-        atomic_write_text(pages_dir / f"page-{number:04}.md", "<!-- Philon source page " + str(number) + " -->\n\n" + "\n\n".join(str(record["reading_text"]) for record in page_records) + "\n")
-    atomic_write_text(root / "package.json", json.dumps({"schema_version": "philon-machine-package/1.0", "document": ir.get("document", {}), "files": {"blocks": "blocks.ndjson", "reading_order": "reading-order.json", "pages": "pages/", "assets": "assets.json"}}, indent=2, ensure_ascii=False))
-    atomic_write_text(root / "README.md", "# Philon machine package\n\nUse `blocks.ndjson` for streaming ingestion, `reading-order.json` for document order, `pages/` for page-level records, and `assets.json` for source-image provenance.\n")
+        page_id = str(page.get("id"))
+        number = int(page.get("number") or 0)
+        page_records = [record for record in records if record["page_id"] == page_id]
+        page_payload = {"schema_version": "1.0", "page": page, "blocks": page_records}
+        atomic_write_text(pages_dir / f"page-{number:04}.json", json.dumps(page_payload, indent=2, ensure_ascii=False))
+        page_markdown = [f"<!-- Philon source page {number} -->", ""]
+        for record in page_records:
+            text = str(record["reading_text"])
+            if record["type"] == "heading":
+                page_markdown.extend(["#" * (record["level"] or 2) + " " + text, ""])
+            elif record["type"] == "caption":
+                page_markdown.extend([f"> {text}", ""])
+            else:
+                page_markdown.extend([text, ""])
+        atomic_write_text(pages_dir / f"page-{number:04}.md", "\n".join(page_markdown).strip() + "\n")
+    atomic_write_text(root / "README.md", "# Philon machine package\n\nUse `blocks.ndjson` for streaming ingestion, `reading-order.json` for document order, `pages/` for page-level records, and `assets.json` for source-image provenance. `text` is source-retained; `reading_text` is the safe reflowed form.\n")
     return root
-
-
 def marker_style_block_type(block: dict[str, Any]) -> str:
     """Map Philon's stable block taxonomy to the familiar page-tree names.
 
@@ -1729,7 +2029,7 @@ def write_output_manifest(output_dir: Path, ir: dict[str, Any], outputs: dict[st
 
 def write_outputs(ir: dict[str, Any], warnings: list[WarningRecord], timings: list[Timing], output_dir: Path, cached: bool, selected_outputs: Iterable[str] | None = None) -> dict[str, Any]:
     output_dir.mkdir(parents=True, exist_ok=True)
-    selected = set(selected_outputs or ("machine", "markdown", "html", "ir", "chunks", "evidence", "table_csv", "assets", "manifest"))
+    selected = set(selected_outputs or DEFAULT_OUTPUTS)
     base = safe_slug(Path(ir["document"]["source"]["filename"]).stem)
     paths = {
         "markdown": output_dir / f"{base}.md",
@@ -1748,7 +2048,9 @@ def write_outputs(ir: dict[str, Any], warnings: list[WarningRecord], timings: li
         atomic_write_text(paths["ir"], json.dumps(ir, indent=2, ensure_ascii=False))
     if "marker_json" in selected:
         atomic_write_text(paths["marker_json"], json.dumps(render_marker_style_json(ir, output_dir), indent=2, ensure_ascii=False))
-    machine_root: Path | None = write_machine_package(ir, output_dir) if "machine" in selected else None
+    machine_root: Path | None = None
+    if "machine" in selected:
+        machine_root = write_machine_package(ir, output_dir)
     chunks = render_chunks(ir)
     if "chunks" in selected:
         atomic_write_text(paths["chunks"], json.dumps(chunks, indent=2, ensure_ascii=False))
@@ -1789,7 +2091,12 @@ def cache_path(cache_dir: Path, content_hash: str, profile: str) -> Path:
 
 
 def convert_file(path: Path, profile: str, output_root: Path, cache_root: Path, cache_policy: str = "use", outputs: Iterable[str] | None = None, progress: Any | None = None) -> dict[str, Any]:
-    """Convert one file while reporting conservative, truthful milestones."""
+    """Convert one file while exposing conservative, truthful milestones.
+
+    The native extraction itself is a bounded third-party operation and cannot
+    report a trustworthy per-page percentage.  The surrounding milestones are
+    therefore explicit rather than fabricating a smooth percentage.
+    """
     report = progress or (lambda _stage, _percent, _message: None)
     report("validating", 4, "Validating the local source")
     preflight_input(path)
@@ -1813,7 +2120,7 @@ def convert_file(path: Path, profile: str, output_root: Path, cache_root: Path, 
             cache_root.mkdir(parents=True, exist_ok=True)
             atomic_write_text(cache_file, json.dumps({"ir": ir, "warnings": [asdict(warning) for warning in warnings], "timings": [asdict(timing) for timing in timings]}, ensure_ascii=False))
     destination = output_root / f"{safe_slug(path.stem)}-{content_hash[:12]}-{profile.lower()}"
-    selected_outputs = set(outputs or ("machine", "markdown", "html", "ir", "chunks", "evidence", "table_csv", "assets", "manifest"))
+    selected_outputs = set(outputs or DEFAULT_OUTPUTS)
     preview_paths: list[str] = []
     extracted_assets: dict[str, Any] | None = None
     overlay_paths: list[str] = []
@@ -1863,11 +2170,15 @@ def action_convert(request: dict[str, Any], progress: Any | None = None) -> dict
     if profile not in {"Fast", "Balanced", "Verified"}:
         raise ValueError("Profile must be Fast, Balanced, or Verified.")
     cache_policy = config.get("cache_policy", "use")
-    outputs = config.get("outputs", ["machine", "markdown", "html", "ir", "chunks", "evidence", "table_csv", "assets", "manifest"])
-    if not isinstance(outputs, list) or not outputs:
+    requested_outputs = config.get("outputs", DEFAULT_OUTPUTS)
+    if not isinstance(requested_outputs, (list, tuple)) or not requested_outputs:
         raise ValueError("At least one output must be requested.")
+    # Verified always exports embeddings. Build a new list rather than
+    # appending, so a caller's request object is never altered and the
+    # response never aliases it.
+    outputs = list(requested_outputs)
     if profile == "Verified" and "embeddings" not in outputs:
-        outputs.append("embeddings")
+        outputs = [*outputs, "embeddings"]
     root = Path(config.get("workspace_dir") or Path.home() / "Library" / "Application Support" / "Philon")
     output_root = root / "exports"
     cache_root = root / "cache"
@@ -1875,8 +2186,9 @@ def action_convert(request: dict[str, Any], progress: Any | None = None) -> dict
     total = len(files)
     for index, item in enumerate(files):
         def report_file(stage: str, percent: int, message: str, *, index: int = index, item: Path = item) -> None:
+            overall = round(((index + percent / 100) / total) * 100)
             if progress:
-                progress({"current": index + 1, "total": total, "percent": round(((index + percent / 100) / total) * 100), "stage": stage, "message": message, "source_path": str(item)})
+                progress({"job_id": config.get("job_id"), "current": index + 1, "total": total, "percent": overall, "stage": stage, "message": message, "source_path": str(item)})
         try:
             report_file("starting", 1, f"Starting {item.name}")
             results.append(convert_file(item, profile, output_root, cache_root, cache_policy, outputs, report_file))
@@ -1894,14 +2206,14 @@ def action_preflight(request: dict[str, Any], progress: Any | None = None) -> di
     total = len(files)
     for index, path in enumerate(files):
         if progress:
-            progress({"current": index + 1, "total": total, "percent": round((index / total) * 100), "stage": "validating", "message": f"Inspecting {path.name}", "source_path": str(path)})
+            progress({"job_id": request.get("config", {}).get("job_id"), "current": index + 1, "total": total, "percent": round((index / total) * 100), "stage": "validating", "message": f"Inspecting {path.name}", "source_path": str(path)})
         try:
             inspection = preflight_input(path)
             items.append({"source_path": str(path), "status": "ready", "preflight": inspection, "route": "manual-local-recognition-required" if inspection["kind"] == "image" else "native-text-pending"})
         except Exception as exc:
             items.append({"source_path": str(path), "status": "blocked", "error": str(exc)})
         if progress:
-            progress({"current": index + 1, "total": total, "percent": round(((index + 1) / total) * 100), "stage": "complete", "message": f"Inspected {path.name}", "source_path": str(path)})
+            progress({"job_id": request.get("config", {}).get("job_id"), "current": index + 1, "total": total, "percent": round(((index + 1) / total) * 100), "stage": "complete", "message": f"Inspected {path.name}", "source_path": str(path)})
     return {"created_at": now(), "items": items, "local_only": True}
 
 
@@ -2145,9 +2457,11 @@ def render_bge_embeddings(chunks: list[dict[str, Any]]) -> tuple[dict[str, Any] 
             raise RuntimeError(detail[:280] or f"exit {process.returncode}")
         parsed = parse_embedding_payload(process.stdout, chunks)
         return {"schema_version": "1.0", "model": pack["id"], "runtime": "llama-embedding", "model_artifact_fingerprint": local_model_fingerprint(Path(pack["local_path"])), **parsed}, None
-    # A non-zero local embedding process is deliberately converted into an
-    # evidence warning. It must never abort an otherwise valid document
-    # conversion or cause Philon to manufacture a vector sidecar.
+    # THE PORT'S ONE INTENTIONAL DIVERGENCE FROM THE SOURCE ENGINE.
+    # A non-zero local embedding process is converted into evidence rather than
+    # failing an otherwise valid conversion, and no vector is emitted. The extra
+    # RuntimeError is what the non-zero exit above raises; the source project
+    # lets it propagate. Documented in docs/PARITY.md.
     except (OSError, subprocess.SubprocessError, ValueError, json.JSONDecodeError, RuntimeError) as exc:
         return None, WarningRecord("EMBEDDING_FAILED", f"Local BGE-M3 embedding was not produced: {exc}. Chunks were exported without vectors.")
 
@@ -2157,9 +2471,11 @@ def action_repair(request: dict[str, Any], progress: Any | None = None) -> dict[
     if repair_mode not in {"transcription", "table", "formula"}:
         raise ValueError("Repair mode must be transcription, table, or formula.")
     packs = model_status()["packs"]
-    pack = next((item for pack_id in ("qwen3.8-27b-local-repair", "olmocr-2-7b-local-candidate") for item in packs if item["id"] == pack_id and item["approved"] and item["available_locally"] and item.get("local_path")), None)
+    enabled_config = request.get("enabled_model_ids")
+    enabled_model_ids = {item for item in enabled_config if isinstance(item, str)} if isinstance(enabled_config, list) else {"qwen3.8-27b-local-repair", "olmocr-2-7b-local-candidate"}
+    pack = next((item for pack_id in ("qwen3.8-27b-local-repair", "olmocr-2-7b-local-candidate") for item in packs if item["id"] == pack_id and item["id"] in enabled_model_ids and item["approved"] and item["available_locally"] and item.get("local_path")), None)
     if not pack or not pack["approved"] or not pack["available_locally"] or not pack.get("local_path"):
-        return {"status": "unavailable", "message": "No approved local repair pack was found. Philon retained the source evidence and did not fabricate a repair.", "block_id": request.get("block_id")}
+        return {"status": "unavailable", "message": "No enabled local repair model was found. Enable an approved local model in Models; Philon retained the source evidence and did not fabricate a repair.", "block_id": request.get("block_id")}
     ir_path = Path(request.get("ir_path", ""))
     block_id = request.get("block_id")
     if not ir_path.exists() or ir_path.suffix != ".json":
@@ -2174,10 +2490,10 @@ def action_repair(request: dict[str, Any], progress: Any | None = None) -> dict[
         raise ValueError("The source page needed for manual repair is no longer available locally.")
     try:
         if progress:
-            progress({"stage": "preparing", "message": "Preparing the selected source region", "percent": 8, "indeterminate": True, "source_path": str(source)})
+            progress({"job_id": request.get("job_id"), "percent": 8, "stage": "preparing", "message": "Preparing the selected source region", "source_path": str(source), "indeterminate": True})
         crop_path = repair_crop(source, page, block, ir_path.parent)
         if progress:
-            progress({"stage": "recognising", "message": "Running the local repair model", "percent": 30, "indeterminate": True, "source_path": str(source)})
+            progress({"job_id": request.get("job_id"), "percent": 30, "stage": "recognising", "message": "Running the local repair model", "source_path": str(source), "indeterminate": True})
         text, run = run_qwen38(Path(pack["local_path"]), crop_path, repair_mode) if pack["id"] == "qwen3.8-27b-local-repair" else run_olmocr(Path(pack["local_path"]), crop_path)
     except Exception as exc:
         return {"status": "unavailable", "message": f"Manual {pack['id']} repair was not run: {exc}", "block_id": block_id}
@@ -2189,7 +2505,7 @@ def action_repair(request: dict[str, Any], progress: Any | None = None) -> dict[
     warnings = [WarningRecord(**item) for item in json.loads(warnings_path.read_text(encoding="utf-8")).get("warnings", [])] if warnings_path.exists() else []
     outputs = write_outputs(ir, warnings, [Timing("manual-olmocr", 0)], ir_path.parent, cached=False)
     if progress:
-        progress({"stage": "complete", "message": "Repair candidate is ready", "percent": 100, "source_path": str(source)})
+        progress({"job_id": request.get("job_id"), "percent": 100, "stage": "complete", "message": "Repair candidate is ready", "source_path": str(source)})
     quality_note = " Its format needs review before restoration." if candidate["quality"]["issues"] else " Its format passed deterministic checks; still compare it with the source before restoration."
     return {"status": "candidate", "message": f"{pack['id']} completed locally as a {repair_mode} candidate.{quality_note}", "block_id": block_id, "block": block, "candidate": candidate, "outputs": outputs}
 
@@ -2266,13 +2582,19 @@ async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, exp
         request = json.loads(raw.decode("utf-8"))
         if not expected_token or not isinstance(request.get("token"), str) or not hmac.compare_digest(request["token"], expected_token):
             raise PermissionError("Unauthenticated local engine request.")
+        def report_progress(payload: dict[str, Any]) -> None:
+            # Unix socket writes are intentionally tiny and line-delimited. This
+            # lets the desktop host forward progress while a CPU-bound local
+            # conversion continues, without opening another listener or
+            # exposing the engine beyond this authenticated socket.
+            writer.write((json.dumps({"type": "progress", "data": payload}, ensure_ascii=False) + "\n").encode("utf-8"))
         action = request.get("action")
         if action == "convert":
-            response = {"ok": True, "data": action_convert(request)}
+            response = {"ok": True, "data": action_convert(request, report_progress)}
         elif action == "preflight":
-            response = {"ok": True, "data": action_preflight(request)}
+            response = {"ok": True, "data": action_preflight(request, report_progress)}
         elif action == "repair":
-            response = {"ok": True, "data": action_repair(request)}
+            response = {"ok": True, "data": action_repair(request, report_progress)}
         elif action == "review":
             response = {"ok": True, "data": action_review(request)}
         elif action == "models":
