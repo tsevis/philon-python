@@ -770,7 +770,11 @@ def classify_block(text: str) -> tuple[str, int | None]:
         return "caption", None
     if re.match(r"^(?:\[\d+\]|\d+\.)\s+.+(?:\d{4}|doi:)", first_line, re.IGNORECASE):
         return "citation", None
-    if line_count <= 3 and re.match(r"^(?:\d+(?:\.\d+)*\s+)?[A-Z][A-Za-z0-9 ,:;()/-]{3,}$", first_line) and len(first_line) < 100:
+    # A heading stands on its own line. Allowing a block of up to three lines
+    # here meant judging ordinary prose by its first line, which starts with a
+    # capital and ends mid-clause rather than with a full stop, and so turned
+    # wrapped paragraphs into headings in the converted document.
+    if line_count == 1 and re.match(r"^(?:\d+(?:\.\d+)*\s+)?[A-Z][A-Za-z0-9 ,:;()/-]{3,}$", first_line) and len(first_line) < 100:
         depth = min(6, first_line.count(".") + 1) if re.match(r"^\d+", first_line) else 2
         return "heading", depth
     return "paragraph", None

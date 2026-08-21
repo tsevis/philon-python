@@ -507,6 +507,27 @@ class PhilonEngineTest(unittest.TestCase):
         self.assertEqual(kind, "paragraph")
         self.assertIsNone(level)
 
+    def test_a_wrapped_paragraph_is_not_a_heading_because_its_first_line_reads_like_one(self):
+        """The first line of ordinary prose looks exactly like a heading.
+
+        It starts with a capital, runs under a hundred characters and ends
+        mid-clause rather than with a full stop, so judging a block by that
+        line alone turned real paragraphs into H2s in converted Markdown.
+        """
+        wrapped = (
+            "Philon of Alexandria read one tradition in the language of another,\n"
+            "quoting the line before drawing out what he took it to mean, and\n"
+            "holding that the literal sense had to stand."
+        )
+        self.assertEqual(engine.classify_block(wrapped), ("paragraph", None))
+        two_lines = "Every block carries its page, its method and its confidence\nso a reader can go back and verify it."
+        self.assertEqual(engine.classify_block(two_lines), ("paragraph", None))
+
+    def test_a_heading_is_a_line_on_its_own(self):
+        self.assertEqual(engine.classify_block("Measuring Shadows"), ("heading", 2))
+        self.assertEqual(engine.classify_block("2.1 Adaptive routing"), ("heading", 2))
+        self.assertEqual(engine.classify_block("3 Results"), ("heading", 1))
+
     def test_geometric_native_assembly_splits_at_measured_paragraph_gaps(self):
         page = {
             "text": "First line\nSecond line\nNew paragraph",
