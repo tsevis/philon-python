@@ -813,6 +813,89 @@ class PhilonEngineTest(unittest.TestCase):
             # an OCR page keeps exactly the behaviour it had.
             self.assertEqual(engine.classify_block(line)[0], "heading", line)
 
+    def test_only_a_bolder_face_grants_a_heading_not_merely_a_different_one(self):
+        """Italic is emphasis, and the text rule promoted it.
+
+        A defined term opening a definition, and a cited title inside a
+        bibliography entry, are both set in italic and both read as headings to
+        a rule that only looks at characters.
+        """
+        italic = {"differs_from_body": True, "bold": False, "face": "Times-Italic"}
+        for line in ["Artificial Mosaic - Given an image I2 in the",
+                     "Similarity Measure Based on Correspondence of"]:
+            self.assertEqual(engine.classify_block(line, typeface=italic)[0], "paragraph", line)
+        bold = {"differs_from_body": True, "bold": True, "face": "Times-Bold"}
+        self.assertEqual(engine.classify_block("Introduction", typeface=bold)[0], "heading")
+
+    def test_a_bold_face_from_another_family_is_still_bold(self):
+        """A document set in LinLibertineT titles itself in LinBiolinumTB.
+
+        Comparing against the body face's own name cannot see that, and the
+        word "bold" does not appear anywhere in it, so the paper's title was
+        classified as prose.
+        """
+        self.assertTrue(engine.is_bold_face("LinBiolinumTB"))
+        self.assertTrue(engine.is_bold_face("LinLibertineTB"))
+        self.assertTrue(engine.is_bold_face("TimesNewRomanPS-BoldMT"))
+        self.assertFalse(engine.is_bold_face("LinLibertineT"))
+        self.assertFalse(engine.is_bold_face("Times-Italic"))
+        self.assertFalse(engine.is_bold_face("Times-Roman"))
+
+    def test_a_face_change_mid_sentence_does_not_split_the_paragraph(self):
+        self.assertTrue(engine.continues_sentence("Artificial Mosaic - Given an image I2 in the",
+                                                  "plane R2 and a vector field"))
+        self.assertFalse(engine.continues_sentence("2 Related Work", "While other mosaic types exist"))
+        self.assertFalse(engine.continues_sentence("A finished sentence.", "and another opens"))
+        self.assertFalse(engine.continues_sentence("Keywords", "Image Mosaics, Photomosaics"))
+
+    def test_a_numbered_heading_line_stands_alone_but_a_list_item_does_not(self):
+        self.assertTrue(engine.stands_alone_as_numbered_heading("4.1 Prompt selection"))
+        self.assertTrue(engine.stands_alone_as_numbered_heading("2. History of Photomosaics"))
+        self.assertFalse(engine.stands_alone_as_numbered_heading("1. Compute a tiling of the target image."))
+        self.assertFalse(engine.stands_alone_as_numbered_heading("Prompt selection"))
+        # A numbered list item, an equation fragment and a bibliography entry
+        # opening with a year all match a looser rule, and each is common
+        # enough to swamp the real headings.
+        self.assertFalse(engine.stands_alone_as_numbered_heading("2. a single tile may cover an area across the"))
+        self.assertFalse(engine.stands_alone_as_numbered_heading("7.1 in order to obtain the feature vector"))
+        self.assertFalse(engine.stands_alone_as_numbered_heading("2021. Stochastic Polyak Step-size for SGD"))
+        self.assertFalse(engine.stands_alone_as_numbered_heading("2002 - Short Presentations. Eurographics"))
+        self.assertFalse(engine.stands_alone_as_numbered_heading("0 elsewhere"))
+        self.assertFalse(engine.stands_alone_as_numbered_heading("64 \u00d7 64, then comparing against the target"))
+        # It must still read a heading written in another alphabet.
+        self.assertTrue(engine.stands_alone_as_numbered_heading("2. \u0395\u03b9\u03c3\u03b1\u03b3\u03c9\u03b3\u03ae"))
+        self.assertTrue(engine.stands_alone_as_numbered_heading("3.1 \u0412\u0432\u0435\u0434\u0435\u043d\u0438\u0435"))
+        self.assertFalse(engine.stands_alone_as_numbered_heading(
+            "3. " + "a numbered sentence that simply runs on and on past any heading length" * 2))
+
+    def test_a_numbered_heading_in_the_body_face_is_separated_and_may_wrap(self):
+        """Some papers set a subsection in the plain body face at body size.
+
+        No measurement of face or size can separate it from the prose around
+        it, so the section number has to; and a heading long enough to wrap
+        must keep its second line rather than orphan it.
+        """
+        def line(text, start, end, y):
+            return {"text": text, "start": start, "end": end, "font": "LinLibertineT", "size": 9.0,
+                    "bbox": engine.make_bbox(72, y, 400, y + 8, "pdf-page-points")}
+        page = {"number": 1, "width": 612, "height": 792, "method": "pdfium-native",
+                "body_font": "LinLibertineT", "text": "", "native_text_lines": [
+                    line("model such as SDXL [33].", 0, 24, 700),
+                    line("2.2 Diffusion-based image generation and", 25, 65, 693),
+                    line("editing", 66, 73, 686),
+                    line("Recently, diffusion models are able to", 74, 112, 679),
+                ]}
+        parts = engine.geometric_native_parts(page, set())
+        self.assertEqual([part["text"] for part in parts], [
+            "model such as SDXL [33].",
+            "2.2 Diffusion-based image generation and\nediting",
+            "Recently, diffusion models are able to",
+        ])
+        blocks = [engine.make_block(page, i + 1, part["text"], part.get("start"), part.get("end"))
+                  for i, part in enumerate(parts)]
+        self.assertEqual([block["type"] for block in blocks], ["paragraph", "heading", "paragraph"])
+        self.assertEqual(blocks[1]["level"], 2)
+
     def test_a_numbered_heading_survives_the_body_face_veto(self):
         """A section number is structure the source states outright.
 

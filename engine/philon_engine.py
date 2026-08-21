@@ -450,6 +450,41 @@ def ocr_parts_with_geometry(page: dict[str, Any], artifacts: set[str]) -> list[d
     return parts or structured_parts_with_spans(page.get("text", ""), artifacts)
 
 
+def stands_alone_as_numbered_heading(text: str) -> bool:
+    """A line that is a section number and a short phrase, and nothing else.
+
+    Deliberately strict. A numbered list item usually runs longer and closes
+    with a full stop, and a heading does neither, so the bound and the absent
+    terminator are what keep list items out.
+    """
+    line = text.strip()
+    if not line or len(line) > NUMBERED_HEADING_CHARS:
+        return False
+    if line[-1] in ".!?,;:":
+        return False
+    # The phrase after the number has to be capitalised and the number has to
+    # look like a section number. Without both, a numbered list item ("2. a
+    # single tile may cover..."), an equation fragment ("1 - a(t)e(x)") and a
+    # bibliography entry opening with a year ("2021. Stochastic Polyak...") all
+    # match, and each of those is common enough to swamp the real headings.
+    return bool(re.match(r"^\d{1,3}(?:\.\d{1,3}){0,3}\.?\s+[A-Z\u0386-\u03ab\u0400-\u042f]", line))
+
+
+def continues_sentence(previous: str, following: str) -> bool:
+    """True when two measured lines are plainly one sentence carried across.
+
+    Deliberately narrow: the first line must not close, and the second must open
+    with a lower-case word. Anything less certain is left to the other rules,
+    because merging two blocks that are genuinely separate is the worse error.
+    """
+    first, second = previous.strip(), following.strip()
+    if not first or not second:
+        return False
+    if first[-1] in ".!?:;\u2026":
+        return False
+    return bool(re.match(r"^[a-z\u00df-\u00ff\u03b1-\u03c9\u0430-\u044f]", second))
+
+
 def geometric_native_parts(page: dict[str, Any], artifacts: set[str]) -> list[dict[str, Any]]:
     """Assemble measured native lines into conservative paragraph candidates."""
     lines = page.get("native_text_lines", [])
@@ -458,7 +493,12 @@ def geometric_native_parts(page: dict[str, Any], artifacts: set[str]) -> list[di
     parts: list[dict[str, Any]] = []
     current: list[dict[str, Any]] = []
 
+    #: Whether the block being assembled was opened by a numbered heading line.
+    #: A list, so the nested flush() can clear it without a nonlocal binding.
+    numbered = [False]
+
     def flush() -> None:
+        numbered[0] = False
         if not current:
             return
         value = "\n".join(entry["text"] for entry in current).strip()
@@ -489,8 +529,31 @@ def geometric_native_parts(page: dict[str, Any], artifacts: set[str]) -> list[di
         # floor, and the heading is absorbed into the paragraph beneath it and
         # ceases to exist as structure. The face the page sets a line in is
         # measured source evidence of the same kind as its position.
-        if current and line.get("font") and prior and prior.get("font") and line["font"] != prior["font"]:
+        # A line that is nothing but a section number and a short phrase is a
+        # heading in essentially every technical document, and some papers set
+        # one in the plain body face at the body size -- no measurement of face
+        # or size can separate it, so the number itself has to.
+        if stands_alone_as_numbered_heading(line["text"]):
             flush()
+            numbered[0] = True
+            current.append(line)
+            continue
+        # ...and it closes at the next line, unless that line plainly finishes
+        # it: a heading long enough to wrap breaks mid-phrase, and orphaning the
+        # remainder makes two wrong blocks out of one right one.
+        if numbered[0] and current and prior:
+            if continues_sentence(prior["text"], line["text"]):
+                current.append(line)
+                continue
+            flush()
+        if current and line.get("font") and prior and prior.get("font") and line["font"] != prior["font"]:
+            # ...unless the sentence plainly runs on across it. An italic term
+            # opening a definition, or a title inside a bibliography entry,
+            # changes face mid-sentence and is emphasis rather than structure.
+            # Splitting there cuts a paragraph in half and leaves the first half
+            # looking exactly like a heading.
+            if not continues_sentence(prior["text"], line["text"]):
+                flush()
         current.append(line)
     flush()
     return parts or structured_parts_with_spans(page["text"], artifacts)
@@ -624,8 +687,16 @@ def source_bbox_for_block(page: dict[str, Any], text: str, start: int | None, en
 
 #: A face whose name carries one of these is set bolder than its family's text
 #: weight. The name is used rather than PDFium's flags because a subset font
-#: often declares no flags at all while still being named for its weight.
-BOLD_FACE = re.compile(r"(?:bold|black|heavy|semibold|-bd\b|,bold)", re.IGNORECASE)
+#: often declares no flags at all while still being named for its weight. The
+#: trailing-capital form is how a subset font commonly spells it: a document set
+#: in LinLibertineT titles itself in LinBiolinumTB, a bold face from a different
+#: family, which no comparison against the body face's own name can see.
+BOLD_WORD = re.compile(r"(?:bold|black|heavy|semibold)", re.IGNORECASE)
+BOLD_SUFFIX = re.compile(r"[A-Za-z](?:B|BD)$")
+
+
+def is_bold_face(face: str) -> bool:
+    return bool(face) and bool(BOLD_WORD.search(face) or BOLD_SUFFIX.search(face))
 #: How many characters of a line to sample when naming the face it is set in.
 #: A line is typographically uniform in the ordinary case, and sampling keeps a
 #: dense page from costing one FFI call per character.
@@ -902,6 +973,8 @@ HEADING_PROMINENCE = 1.25
 #: bold lead-in sentence or an emphasised paragraph, not a section title.
 HEADING_FACE_LINES = 2
 HEADING_FACE_CHARS = 120
+#: A numbered heading is a short phrase; past this it is a numbered sentence.
+NUMBERED_HEADING_CHARS = 80
 
 
 def is_numbered_heading(first_line: str) -> bool:
@@ -951,14 +1024,26 @@ def classify_block(text: str, prominence: float | None = None, typeface: dict[st
     # rule alone promoted all three. Where the page sets the line in the plain
     # body face at the body size, it has already answered the question, and a
     # guess from the characters must not overrule a measurement of the type.
-    set_as_body = bool(typeface) and not typeface.get("differs_from_body") and not is_numbered_heading(first_line)
-    if (line_count == 1 or prominent) and not set_as_body and re.match(r"^(?:\d+(?:\.\d+)*\s+)?[A-Z][A-Za-z0-9 ,:;()/-]{3,}$", first_line) and len(first_line) < 100:
+    # The page sets a heading apart by weight. A face that merely *differs* from
+    # the body face is as likely to be italic -- emphasis, a defined term, a
+    # cited title -- and the text rule promoted those too. So the measurement
+    # grants a heading only where the face is bolder, and refuses everywhere
+    # else it was actually taken.
+    set_apart = bool(typeface) and bool(typeface.get("bold"))
+    measured_as_prose = bool(typeface) and not set_apart and not is_numbered_heading(first_line)
+    if (line_count == 1 or prominent) and not measured_as_prose and re.match(r"^(?:\d+(?:\.\d+)*\s+)?[A-Z][A-Za-z0-9 ,:;()/-]{3,}$", first_line) and len(first_line) < 100:
         return "heading", heading_depth(first_line)
     # A run the page sets in a different, bolder face than the body text is a
     # heading whatever alphabet it is written in. The text rules above are
     # ASCII-Latin only, so without this a Greek, Cyrillic or accented heading
     # could never be one; and they demand no terminal punctuation, so a heading
     # ending in '?', '&' or a full stop could not be one either.
+    # A numbered heading may be set in the plain body face and may wrap. The
+    # segmenter isolates it on the strength of its number, so the classifier
+    # honours the same evidence rather than losing it to the single-line rule.
+    if stands_alone_as_numbered_heading(first_line) and line_count <= HEADING_FACE_LINES \
+            and len(text.strip()) <= HEADING_FACE_CHARS:
+        return "heading", heading_depth(first_line)
     if typeface and typeface.get("differs_from_body") and typeface.get("bold") and line_count <= HEADING_FACE_LINES:
         stripped = text.strip()
         if 0 < len(stripped) <= HEADING_FACE_CHARS and not stripped.endswith((".", ";")):
@@ -1055,7 +1140,7 @@ def block_typeface(page: dict[str, Any], start: int | None, end: int | None) -> 
     return {
         "face": face,
         "differs_from_body": face != body_face,
-        "bold": bool(BOLD_FACE.search(face)) or _is_bolder_sibling(face, body_face),
+        "bold": is_bold_face(face) or _is_bolder_sibling(face, body_face),
     }
 
 
