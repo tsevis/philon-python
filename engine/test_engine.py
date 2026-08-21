@@ -868,6 +868,70 @@ class PhilonEngineTest(unittest.TestCase):
         self.assertFalse(engine.stands_alone_as_numbered_heading(
             "3. " + "a numbered sentence that simply runs on and on past any heading length" * 2))
 
+    def test_a_float_caption_is_a_caption_and_not_a_section_heading(self):
+        """An algorithm listing has a title, not a section of the document.
+
+        Marker renders "Algorithm 1 Compute loss" as a heading. That is the
+        wrong kind: promoting it puts two chunks under the heading path
+        ['4 Method', 'Algorithm 1 Compute loss'], telling a reader of the
+        chunks that they are sections of the algorithm. A figure, a table and
+        an algorithm listing are the same kind of thing, and Philon already
+        calls the first two captions.
+        """
+        for line in ["Algorithm 1 Compute loss", "Figure 1: Diffusion-based photomosaics",
+                     "Table 2: Results", "Listing 3 Parsing the manifest"]:
+            self.assertEqual(engine.classify_block(line)[0], "caption", line)
+
+    def test_a_sentence_mentioning_a_float_is_not_its_caption(self):
+        """The control, and the reason the capital is required.
+
+        "Algorithm 1 details the method..." is prose about the algorithm; the
+        word after the number is what tells them apart.
+        """
+        for line in ["Algorithm 1 details the method for adaptively weighting pixels",
+                     "Figure 2 shows the result of the comparison",
+                     "Table 1 lists every measured configuration"]:
+            self.assertNotEqual(engine.classify_block(line)[0], "caption", line)
+
+    def test_a_float_caption_starts_its_own_block(self):
+        """Its caption interrupts the column flow, so no other rule can fire.
+
+        The line before it can end mid-word, which defeats the sentence tests,
+        and the gaps are ordinary leading, which defeats the whitespace rule.
+        On a real paper this left the caption and its whole listing inside a
+        29-line paragraph that opened with unrelated prose.
+        """
+        def line(text, start, end, y, width=240):
+            return {"text": text, "start": start, "end": end, "font": "LinLibertineT", "size": 9.0,
+                    "bbox": engine.make_bbox(72, y, 72 + width, y + 8, "pdf-page-points")}
+        page = {"number": 1, "width": 612, "height": 792, "method": "pdfium-native",
+                "body_font": "LinLibertineT", "text": "", "native_text_lines": [
+                    line("remaining process synthesizes fine details and tex", 0, 49, 700),
+                    line("Algorithm 1 Compute loss", 50, 74, 692, 108),
+                    line("Require: Set of SLIC regions", 75, 103, 684, 100),
+                ]}
+        parts = engine.geometric_native_parts(page, set())
+        self.assertIn("Algorithm 1 Compute loss", [part["text"] for part in parts])
+        blocks = [engine.make_block(page, i + 1, part["text"], part.get("start"), part.get("end"))
+                  for i, part in enumerate(parts)]
+        self.assertEqual(blocks[1]["type"], "caption")
+
+    def test_a_caption_broken_around_mathematics_stays_one_block(self):
+        """A line opening with punctuation is plainly a continuation.
+
+        A figure caption wrapped around inline mathematics does this
+        constantly, and reading ", a SLIC segmentation map" as a fresh block
+        left a fragment that the face rules then promoted to a heading.
+        """
+        self.assertTrue(engine.continues_sentence("method include (left to right): a target layout",
+                                                  ", a SLIC segmentation map"))
+        self.assertTrue(engine.continues_sentence("the quantile weights", "; and the mask"))
+        self.assertFalse(engine.continues_sentence("A closed sentence.", ", a fragment"))
+        fragment = {"differs_from_body": True, "bold": True, "face": "LinLibertineTB",
+                    "precedes_numeric_rows": False}
+        self.assertEqual(engine.classify_block(", a SLIC segmentation map", typeface=fragment)[0],
+                         "paragraph")
+
     def test_a_short_line_in_a_bolder_face_stands_on_its_own(self):
         """A paper sets its captions in the same bold as its headings.
 
