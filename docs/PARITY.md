@@ -6,6 +6,25 @@ This port was compared against the authored source in `/Users/tsevis/AI/ClaudeCo
 
 The Python port retains the original engine and harness as its conversion/evidence authority. Its one intentional engine hardening converts a non-zero local BGE-M3 process into `EMBEDDING_FAILED` evidence rather than failing an otherwise valid Verified conversion. No vector is emitted in that case.
 
+### The two engine copies had drifted, and this claim was not true
+
+Until this revision the two copies of `engine/philon_engine.py` differed by **46
+hunks**, not by the one divergence above. `diff` now reports exactly one hunk:
+the `RuntimeError` in that `except` tuple, carrying a comment that says so, and
+`engine/test_engine.py` is the same suite in both repositories.
+
+The drift was not cosmetic and the port was the copy that was behind. It was
+missing a fix that stops `action_convert` mutating its caller's request object
+and aliasing that list into the response; it had no `enabled_model_ids` gate, so
+a repair could use an approved pack the user had not enabled; its socket bridge
+forwarded no progress and no `job_id`; and it carried **two live definitions
+each** of `render_markdown` and `render_html`, the first of each being dead code
+shadowed by the second. Nothing detected any of it, because each repository
+tests its own copy and both suites passed throughout.
+
+Anything that changes this file must change it in both places, and `diff` over
+the two copies is the check that says whether that happened.
+
 | Area | Status | Evidence |
 |---|---|---|
 | Native desktop shell and menus | Implemented | PySide6 Qt production binding; native File/View menus and keyboard shortcuts in `philon_desktop/app.py`. PyQt6 remains a development-only fallback when PySide6 is not installed. |
