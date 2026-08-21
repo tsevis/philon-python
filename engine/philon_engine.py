@@ -522,6 +522,29 @@ def stands_alone_as_short_bold_line(line: dict[str, Any], previous: dict[str, An
     return True
 
 
+#: The floats a technical document titles rather than numbers into its section
+#: hierarchy. An algorithm listing, a figure and a table are the same kind of
+#: thing: a block with a title of its own that is NOT a section of the document.
+FLOAT_CAPTION = re.compile(
+    r"^(?:Figure|Fig\.|Table|Algorithm|Listing|Scheme|Equation|Chart|Plate)\s+\d+[.:]?\s+\S",
+    re.IGNORECASE)
+
+
+def opens_a_float_caption(text: str) -> bool:
+    """True for a line that titles a figure, table or algorithm listing.
+
+    The word after the number must be capitalised, which is what separates the
+    caption "Algorithm 1 Compute loss" from the sentence "Algorithm 1 details
+    the method for adaptively weighting pixel contributions" -- the same test
+    that keeps numbered list items out of the heading set.
+    """
+    line = text.strip()
+    if not FLOAT_CAPTION.match(line):
+        return False
+    after_number = re.match(r"^\S+\s+\d+[.:]?\s+(.)", line)
+    return bool(after_number) and after_number.group(1).isupper()
+
+
 def stands_alone_as_numbered_heading(text: str) -> bool:
     """A line that is a section number and a short phrase, and nothing else.
 
@@ -554,6 +577,12 @@ def continues_sentence(previous: str, following: str) -> bool:
         return False
     if first[-1] in ".!?:;\u2026":
         return False
+    # A line opening with punctuation that cannot begin a sentence is plainly a
+    # continuation. A figure caption broken around inline mathematics does this
+    # constantly -- ", a SLIC segmentation map" -- and reading it as a fresh
+    # block leaves a fragment that the face rules then promote to a heading.
+    if second[0] in ",;:)]}\u2019\u201d":
+        return True
     return bool(re.match(r"^[a-z\u00df-\u00ff\u03b1-\u03c9\u0430-\u044f]", second))
 
 
@@ -571,9 +600,12 @@ def geometric_native_parts(page: dict[str, Any], artifacts: set[str]) -> list[di
     #: Whether the block being assembled was opened by a numbered heading line.
     #: A list, so the nested flush() can clear it without a nonlocal binding.
     numbered = [False]
+    #: ...and whether it was opened by a float's caption line.
+    floating = [False]
 
     def flush() -> None:
         numbered[0] = False
+        floating[0] = False
         if not current:
             return
         value = "\n".join(entry["text"] for entry in current).strip()
@@ -609,6 +641,23 @@ def geometric_native_parts(page: dict[str, Any], artifacts: set[str]) -> list[di
         # heading in essentially every technical document, and some papers set
         # one in the plain body face at the body size -- no measurement of face
         # or size can separate it, so the number itself has to.
+        # A float's title starts a block. Its caption commonly interrupts the
+        # column flow, so the line before it can end mid-word and none of the
+        # sentence or whitespace rules can fire: on a real paper this left
+        # "Algorithm 1 Compute loss" and its whole listing inside a 29-line
+        # paragraph that opened with unrelated prose.
+        if opens_a_float_caption(line["text"]):
+            flush()
+            current.append(line)
+            floating[0] = True
+            previous_line = line
+            continue
+        if floating[0] and current and prior:
+            if continues_sentence(prior["text"], line["text"]):
+                current.append(line)
+                previous_line = line
+                continue
+            flush()
         if stands_alone_as_numbered_heading(line["text"]):
             flush()
             numbered[0] = True
@@ -1094,7 +1143,7 @@ def classify_block(text: str, prominence: float | None = None, typeface: dict[st
         return "table", None
     if is_formula(text):
         return "formula", None
-    if re.match(r"^(?:Figure|Fig\.|Table)\s+\d+[.:]", first_line, re.IGNORECASE):
+    if opens_a_float_caption(first_line):
         return "caption", None
     if re.match(r"^(?:\[\d+\]|\d+\.)\s+.+(?:\d{4}|doi:)", first_line, re.IGNORECASE):
         return "citation", None
@@ -1135,7 +1184,10 @@ def classify_block(text: str, prominence: float | None = None, typeface: dict[st
     if typeface and typeface.get("differs_from_body") and typeface.get("bold") \
             and not typeface.get("precedes_numeric_rows") and line_count <= HEADING_FACE_LINES:
         stripped = text.strip()
-        if 0 < len(stripped) <= HEADING_FACE_CHARS and not stripped.endswith((".", ";")):
+        # A heading opens a phrase; a fragment cut out of one does not. Without
+        # this the face rule promotes the middle of a broken caption.
+        opens_a_phrase = bool(stripped) and (stripped[0].isalnum() or stripped[0] in "\u2018\u201c(")
+        if opens_a_phrase and len(stripped) <= HEADING_FACE_CHARS and not stripped.endswith((".", ";")):
             return "heading", heading_depth(first_line)
     return "paragraph", None
 
