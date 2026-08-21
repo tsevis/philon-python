@@ -89,5 +89,19 @@ command line in `scripts/package-macos.sh`, because that invocation regenerates
 the spec file on every run and a hand-edited spec was being silently
 overwritten. The project is licensed MIT.
 
+## Licence and what ships
+
+Philon's own source is MIT. The bundle also carries Qt, through PySide6 and
+shiboken6, under LGPL-3.0-only: used unmodified and through the public API, and
+shipped as separate dynamic libraries rather than linked into the application
+binary. Distribution has to keep those libraries replaceable and carry the LGPL
+notice.
+
+That decision is recorded against the components in `SBOM.cdx.json`, and
+`tests/sbom_policy.py` fails if a shipped copyleft component does not carry it.
+The source project refuses copyleft in its shipped set outright; this port
+cannot, because Qt is the interface, so the rule here is that the decision is
+written down rather than assumed.
+
 See [the parity report](docs/PARITY.md) for implementation and validation status, including externally gated functionality.
 

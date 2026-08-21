@@ -13,6 +13,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 DISTRIBUTIONS = {"shipped": "required", "build-only": "excluded", "test-only": "excluded"}
+# The source project refuses any copyleft component in the shipped set, on the
+# grounds that it needs a licence decision rather than an oversight. This port
+# genuinely ships one — Qt, through PySide6 — so the rule here is that the
+# decision must be written down against the component, not that it cannot exist.
+COPYLEFT = ("GPL", "AGPL", "LGPL", "SSPL")
 # A version, not a range: a manifest that says "10.0+" cannot identify what shipped.
 RESOLVED = re.compile(r"\d+(\.\d+)*([._-]?(a|b|rc|post|dev)\d+)?")
 
@@ -37,6 +42,17 @@ for component in bom["components"]:
         raise SystemExit(f"{where} must declare philon:distribution as one of {', '.join(DISTRIBUTIONS)}.")
     if component.get("scope") != DISTRIBUTIONS[distribution]:
         raise SystemExit(f"{where} is {distribution}, so its CycloneDX scope must be {DISTRIBUTIONS[distribution]}.")
+    licence = component["licenses"][0].get("expression") or component["licenses"][0].get("license", {}).get("id", "")
+    if distribution == "shipped" and licence.upper().startswith(COPYLEFT):
+        decision = next(
+            (p["value"] for p in component.get("properties", []) if p["name"] == "philon:copyleft-decision"),
+            "",
+        )
+        if len(decision.strip()) < 40:
+            raise SystemExit(
+                f"{where} ships under {licence} and must carry a philon:copyleft-decision property "
+                "recording how that licence is satisfied."
+            )
     declared[name.lower()] = distribution
 
 # Anything the application requires at runtime has to be declared as shipped,

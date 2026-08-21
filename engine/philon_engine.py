@@ -22,6 +22,7 @@ import logging
 import os
 import re
 import shutil
+import statistics
 import subprocess
 import sys
 import tempfile
@@ -758,7 +759,22 @@ def ocr_textless_pdf_pages(path: Path, pages: list[dict[str, Any]], profile: str
     return warnings
 
 
-def classify_block(text: str) -> tuple[str, int | None]:
+#: How much larger than the page's median line a block must be set before it
+#: can be a heading across more than one line. Judged against real documents
+#: rather than chosen: a subheading is commonly 1.15x body text, so the gate
+#: sits above that to keep emphasis from being read as structure.
+HEADING_PROMINENCE = 1.25
+
+
+def classify_block(text: str, prominence: float | None = None) -> tuple[str, int | None]:
+    """Name a block from its text, and from how large that text is set.
+
+    `prominence` is the block's line height against the page's median line
+    height, where the page measured it. A heading is a line of its own, because
+    the first line of ordinary prose looks exactly like one; a title that wraps
+    is only readable as a heading when the page shows it set larger than the
+    body text around it.
+    """
     first_line = text.splitlines()[0] if text else ""
     line_count = len([line for line in text.splitlines() if line.strip()])
     if table_rows(text):
@@ -769,11 +785,12 @@ def classify_block(text: str) -> tuple[str, int | None]:
         return "caption", None
     if re.match(r"^(?:\[\d+\]|\d+\.)\s+.+(?:\d{4}|doi:)", first_line, re.IGNORECASE):
         return "citation", None
-    # A heading stands on its own line. Allowing a block of up to three lines
-    # here meant judging ordinary prose by its first line, which starts with a
-    # capital and ends mid-clause rather than with a full stop, and so turned
-    # wrapped paragraphs into headings in the converted document.
-    if line_count == 1 and re.match(r"^(?:\d+(?:\.\d+)*\s+)?[A-Z][A-Za-z0-9 ,:;()/-]{3,}$", first_line) and len(first_line) < 100:
+    # A heading stands on its own line, unless the page measured it as larger
+    # type than the prose around it. Judging by the first line alone turned
+    # wrapped paragraphs into headings, because that line starts with a capital
+    # and ends mid-clause rather than with a full stop.
+    prominent = prominence is not None and prominence >= HEADING_PROMINENCE and line_count <= 3
+    if (line_count == 1 or prominent) and re.match(r"^(?:\d+(?:\.\d+)*\s+)?[A-Z][A-Za-z0-9 ,:;()/-]{3,}$", first_line) and len(first_line) < 100:
         depth = min(6, first_line.count(".") + 1) if re.match(r"^\d+", first_line) else 2
         return "heading", depth
     return "paragraph", None
@@ -814,8 +831,39 @@ def route_for_page(page: dict[str, Any], health: dict[str, Any]) -> dict[str, An
     }
 
 
+def block_prominence(page: dict[str, Any], start: int | None, end: int | None) -> float | None:
+    """How large this block is set, against the median line on its own page.
+
+    Only native extraction measures line boxes, so an OCR page returns None and
+    the single-line heading rule stands there on its own. A page with almost no
+    lines returns None too: a median drawn from one or two lines says nothing
+    about what counts as body text.
+    """
+    if start is None or end is None:
+        return None
+    page_heights: list[float] = []
+    block_heights: list[float] = []
+    for line in page.get("native_text_lines", []):
+        box = line.get("bbox")
+        if not isinstance(box, dict):
+            continue
+        try:
+            height = float(box["y1"]) - float(box["y0"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if height <= 0:
+            continue
+        page_heights.append(height)
+        if line.get("start", -1) < end and line.get("end", -1) > start:
+            block_heights.append(height)
+    if len(page_heights) < 4 or not block_heights:
+        return None
+    page_median = statistics.median(page_heights)
+    return statistics.median(block_heights) / page_median if page_median > 0 else None
+
+
 def make_block(page: dict[str, Any], ordinal: int, text: str, start: int | None = None, end: int | None = None, ocr_line_indexes: list[int] | None = None) -> dict[str, Any]:
-    kind, level = classify_block(text)
+    kind, level = classify_block(text, prominence=block_prominence(page, start, end))
     health = native_health(text)
     page_id = f"page-{page['number']}"
     block_id = f"{page_id}-block-{ordinal}"

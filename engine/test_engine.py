@@ -528,6 +528,54 @@ class PhilonEngineTest(unittest.TestCase):
         self.assertEqual(engine.classify_block("2.1 Adaptive routing"), ("heading", 2))
         self.assertEqual(engine.classify_block("3 Results"), ("heading", 1))
 
+    def test_a_wrapped_title_is_a_heading_when_the_type_is_larger(self):
+        """A heading that wraps is still a heading if the page shows it is one.
+
+        Requiring a single line keeps prose out of the heading set, but a title
+        long enough to wrap would be lost with it. The page's own geometry
+        settles it: type noticeably larger than the body text is a heading even
+        across two lines, and type the same size as the body is not.
+        """
+        title = "Measuring shadows in the margins of\na fifteenth century manuscript"
+        self.assertEqual(engine.classify_block(title, prominence=1.7), ("heading", 2))
+        self.assertEqual(engine.classify_block(title, prominence=1.0), ("paragraph", None))
+        self.assertEqual(engine.classify_block(title), ("paragraph", None))
+
+    def test_prominent_type_does_not_make_a_page_of_prose_into_headings(self):
+        prose = ("Philon of Alexandria read one tradition in the language of another,\n"
+                 "quoting the line before drawing out what he took it to mean, and\n"
+                 "holding that the literal sense had to stand.")
+        # Four lines is past what a heading runs to, whatever its size.
+        long_block = prose + "\nA fourth measured line of the same paragraph."
+        self.assertEqual(engine.classify_block(long_block, prominence=2.0), ("paragraph", None))
+
+    def test_a_measured_page_reads_a_wrapped_title_as_a_heading(self):
+        """The whole path, not just the rule: geometry from the page decides."""
+        def line(text, start, end, y, height):
+            return {"text": text, "start": start, "end": end,
+                    "bbox": engine.make_bbox(72, y, 400, y + height, "pdf-page-points")}
+
+        page = {
+            "number": 1, "width": 612, "height": 792, "method": "pdfium-native",
+            "text": "",
+            "native_text_lines": [
+                line("Measuring shadows in the margins of", 0, 35, 700, 20),
+                line("a fifteenth century manuscript", 36, 66, 676, 20),
+                line("Philon of Alexandria read one tradition in", 67, 109, 640, 11),
+                line("the language of another, quoting the line", 110, 151, 626, 11),
+                line("before drawing out what it meant.", 152, 185, 612, 11),
+            ],
+        }
+        title = engine.make_block(page, 1, "Measuring shadows in the margins of\na fifteenth century manuscript", 0, 66)
+        body = engine.make_block(page, 2, "Philon of Alexandria read one tradition in\nthe language of another, quoting the line\nbefore drawing out what it meant.", 67, 185)
+        self.assertEqual(title["type"], "heading")
+        self.assertEqual(body["type"], "paragraph")
+
+    def test_an_ocr_page_measures_no_type_size_and_keeps_the_single_line_rule(self):
+        page = {"number": 1, "width": 612, "height": 792, "method": "apple-vision-ocr", "ocr_lines": []}
+        block = engine.make_block(page, 1, "A title that wrapped\nacross two lines", 0, 37)
+        self.assertEqual(block["type"], "paragraph")
+
     def test_geometric_native_assembly_splits_at_measured_paragraph_gaps(self):
         page = {
             "text": "First line\nSecond line\nNew paragraph",

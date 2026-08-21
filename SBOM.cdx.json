@@ -2,7 +2,7 @@
   "bomFormat": "CycloneDX",
   "specVersion": "1.5",
   "serialNumber": "urn:uuid:9a1f6b37-a768-4e81-8195-8ef75b8a6600",
-  "version": 2,
+  "version": 3,
   "metadata": {
     "component": {
       "type": "application",
@@ -35,6 +35,10 @@
         {
           "name": "philon:distribution",
           "value": "shipped"
+        },
+        {
+          "name": "philon:copyleft-decision",
+          "value": "LGPL-3.0-only: PySide6 and shiboken6 are used unmodified, through their public API, and ship as separate dynamic libraries inside the bundle rather than being linked into the application binary. Distribution must keep those libraries replaceable and carry the LGPL notice; Philon's own source stays MIT."
         }
       ]
     },
@@ -55,6 +59,10 @@
         {
           "name": "philon:distribution",
           "value": "shipped"
+        },
+        {
+          "name": "philon:copyleft-decision",
+          "value": "LGPL-3.0-only: PySide6 and shiboken6 are used unmodified, through their public API, and ship as separate dynamic libraries inside the bundle rather than being linked into the application binary. Distribution must keep those libraries replaceable and carry the LGPL notice; Philon's own source stays MIT."
         }
       ]
     },

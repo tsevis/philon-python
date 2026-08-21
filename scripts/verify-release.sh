@@ -13,7 +13,15 @@ fi
 PYTHON="${VENV}/bin/python"
 
 "${PYTHON}" -m unittest discover -s tests -v
-"${PYTHON}" -m unittest engine/test_engine.py engine/test_fuzz.py bench/test_run.py -v
+# Build the Apple Vision helper before the engine suite runs, so the two
+# integration tests execute rather than skipping. The source project does the
+# same, and without it a local run is quietly weaker than the one it mirrors.
+if [[ ! -x "${ROOT_DIR}/engine/dist/philon-vision-ocr" ]]; then
+  mkdir -p "${ROOT_DIR}/engine/dist"
+  swiftc -O -framework Vision -framework AppKit "${ROOT_DIR}/engine/vision_ocr.swift" \
+    -o "${ROOT_DIR}/engine/dist/philon-vision-ocr"
+fi
+PHILON_VISION_INTEGRATION=1 "${PYTHON}" -m unittest engine/test_engine.py engine/test_fuzz.py bench/test_run.py -v
 "${PYTHON}" tests/local_only_policy.py
 "${PYTHON}" tests/license_policy.py
 "${PYTHON}" tests/sbom_policy.py
