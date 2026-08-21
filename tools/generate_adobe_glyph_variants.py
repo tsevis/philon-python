@@ -9,7 +9,20 @@ import re
 
 from fontTools.agl import LEGACY_AGL2UV as AGL
 
-SUFFIX = re.compile(r"(sansserif|sans|serif|smallcaps|small|oldstyle|superior|inferior|monospace)$", re.IGNORECASE)
+#: Only the variant families where the base character is not in doubt.
+#:
+#: A serif or sans copyright sign IS the copyright sign, and an old-style figure
+#: IS that digit: the glyph differs, the character does not. The families left
+#: out are the ones where resolving would decide something the source did not
+#: say. A small capital is a capital letter used where a lower-case one would
+#: normally sit, so `Asmall` could reasonably be "A" or "a" and the AGL name
+#: settles only the shape. A superior or inferior letter carries position as
+#: part of its meaning -- a footnote marker, an ordinal, an abbreviation -- and
+#: flattening it to the base letter silently drops that.
+#:
+#: Those glyphs stay in the private-use area and are reported as unreadable,
+#: which is the honest answer: Philon can say what it does not know.
+SUFFIX = re.compile(r"(sansserif|sans|serif|oldstyle)$", re.IGNORECASE)
 
 
 def single(value):
