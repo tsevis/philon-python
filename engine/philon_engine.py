@@ -904,6 +904,11 @@ HEADING_FACE_LINES = 2
 HEADING_FACE_CHARS = 120
 
 
+def is_numbered_heading(first_line: str) -> bool:
+    """A leading section number is structure the source states outright."""
+    return bool(re.match(r"^\d+(?:\.\d+)*\.?\s+\S", first_line))
+
+
 def heading_depth(first_line: str) -> int:
     """Read a heading's level from its own section number, else default to 2."""
     number = re.match(r"^(\d+(?:\.\d+)*)", first_line)
@@ -940,7 +945,14 @@ def classify_block(text: str, prominence: float | None = None, typeface: dict[st
     # wrapped paragraphs into headings, because that line starts with a capital
     # and ends mid-clause rather than with a full stop.
     prominent = prominence is not None and prominence >= HEADING_PROMINENCE and line_count <= 3
-    if (line_count == 1 or prominent) and re.match(r"^(?:\d+(?:\.\d+)*\s+)?[A-Z][A-Za-z0-9 ,:;()/-]{3,}$", first_line) and len(first_line) < 100:
+    # The page's own measurement is allowed to say no, not only yes. A short
+    # line that starts with a capital and ends mid-clause reads exactly like a
+    # heading -- an author line, an affiliation, a keyword list -- and the text
+    # rule alone promoted all three. Where the page sets the line in the plain
+    # body face at the body size, it has already answered the question, and a
+    # guess from the characters must not overrule a measurement of the type.
+    set_as_body = bool(typeface) and not typeface.get("differs_from_body") and not is_numbered_heading(first_line)
+    if (line_count == 1 or prominent) and not set_as_body and re.match(r"^(?:\d+(?:\.\d+)*\s+)?[A-Z][A-Za-z0-9 ,:;()/-]{3,}$", first_line) and len(first_line) < 100:
         return "heading", heading_depth(first_line)
     # A run the page sets in a different, bolder face than the body text is a
     # heading whatever alphabet it is written in. The text rules above are

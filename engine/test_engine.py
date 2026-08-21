@@ -796,6 +796,33 @@ class PhilonEngineTest(unittest.TestCase):
             # the face is what decided it and not the words.
             self.assertEqual(engine.classify_block(title, typeface=body)[0], "paragraph", title)
 
+    def test_the_measured_face_can_refuse_a_heading_as_well_as_grant_one(self):
+        """An author line, an affiliation and a keyword list all read as headings.
+
+        Each is short, starts with a capital and ends mid-clause, so the text
+        rule promoted all three. The page had already answered the question by
+        setting them in the plain body face, and that measurement was only ever
+        consulted to say yes. On a real paper this turned the keyword *values*
+        into an H2 directly under the "Keywords" heading.
+        """
+        body = {"differs_from_body": False, "bold": False, "face": "LinLibertineT"}
+        for line in ["Image Mosaics, Photomosaics, Image Generation, Diffusion Models",
+                     "Charis Tsevis", "Athens, Greece", "See Table 3 for details"]:
+            self.assertEqual(engine.classify_block(line, typeface=body)[0], "paragraph", line)
+            # The control: with no measurement, the text rule still decides, so
+            # an OCR page keeps exactly the behaviour it had.
+            self.assertEqual(engine.classify_block(line)[0], "heading", line)
+
+    def test_a_numbered_heading_survives_the_body_face_veto(self):
+        """A section number is structure the source states outright.
+
+        Some documents set a numbered heading in the body face and separate it
+        by space alone, so the veto must not swallow it.
+        """
+        body = {"differs_from_body": False, "bold": False, "face": "Times-Roman"}
+        self.assertEqual(engine.classify_block("3 Results", typeface=body), ("heading", 1))
+        self.assertEqual(engine.classify_block("2.1 Adaptive routing", typeface=body), ("heading", 2))
+
     def test_the_face_rule_does_not_promote_a_bold_lead_in_paragraph(self):
         head = {"differs_from_body": True, "bold": True, "face": "Times-Bold"}
         sentence = "Artificial Mosaic - Given an image in the plane and a vector field defined on that region representing the edges, find N sites and place N rectangles."
