@@ -52,10 +52,15 @@ importable on the machine. It builds an ad-hoc signed `dist/Philon.app` with the
 
 ## Releases
 
-A version number here describes the application, and tracks the source project
-so that a Philon release and its port are not confusing to compare. The engine
-contract and the IR version are separate and both remain at 0.2.0, so a
-document converted by either project at any 0.2.x carries the same evidence.
+A version number here describes this application, and moves when this
+application changes. It does not track the source project: each releases when
+it has something to release, so the two numbers drift apart on purpose rather
+than one being bumped to match a fix it does not contain. This port is 0.2.3
+while Philon is 0.2.2.
+
+What does have to match is the engine contract and the IR version, and both
+remain at 0.2.0: a document converted by either project at any 0.2.x carries
+the same evidence.
 
 **0.2.3** — Packaging builds from the project virtual environment instead of
 whatever interpreter is on `PATH`. PyInstaller collects what it can import, so
@@ -70,11 +75,12 @@ still running aborts the process, so quitting during a library refresh or an
 export crashed rather than closed; the upgrade to PySide6 6.11 made it
 reproducible.
 
-**0.2.2** — Version parity only; nothing in this port changed. The engine
-shutdown fix that prompted Philon 0.2.2 does not apply here: that bug was in
-the Tauri host, which spawns the engine as a sidecar and left it running after
-quitting. This port imports the engine into its own process, so there is no
-sidecar to orphan. The packaging script and docs stopped calling the bundle
+**0.2.2** — Nothing in this port changed; the number was moved to match the
+source project, which is the practice this project has since dropped. The
+engine shutdown fix that prompted Philon 0.2.2 does not apply here: that bug
+was in the Tauri host, which spawns the engine as a sidecar and left it running
+after quitting. This port imports the engine into its own process, so there is
+no sidecar to orphan. The packaging script and docs stopped calling the bundle
 unsigned, which it has not been since it started carrying an ad-hoc seal.
 
 **0.2.1** — The packaged application declares `com.tsevis.philon-python` rather
