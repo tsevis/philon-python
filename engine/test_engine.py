@@ -868,6 +868,69 @@ class PhilonEngineTest(unittest.TestCase):
         self.assertFalse(engine.stands_alone_as_numbered_heading(
             "3. " + "a numbered sentence that simply runs on and on past any heading length" * 2))
 
+    def test_a_short_line_in_a_bolder_face_stands_on_its_own(self):
+        """A paper sets its captions in the same bold as its headings.
+
+        "Abstract" was absorbed by the figure caption above it and "CCS
+        Concepts" by the bold category list below it, because neither boundary
+        is a change of face and both gaps are smaller than a paragraph break.
+        Width separates them: on that page the body lines are justified at
+        1.00x the median measured line while those two sit at 0.17x and 0.29x.
+        """
+        def line(text, start, end, y, width, font):
+            return {"text": text, "start": start, "end": end, "font": font, "size": 9.0,
+                    "bbox": engine.make_bbox(72, y, 72 + width, y + 8, "pdf-page-points")}
+        page = {"number": 1, "width": 612, "height": 792, "method": "pdfium-native",
+                "body_font": "LinLibertineT", "text": "", "native_text_lines": [
+                    line("a pre-trained diffusion model can be adapted to this purpose.", 0, 60, 700, 240, "LinLibertineTB"),
+                    line("Abstract", 61, 69, 692, 41, "LinLibertineTB"),
+                    line("Image mosaics have traditionally been automated by a search", 70, 129, 684, 240, "LinLibertineT"),
+                    line("method to match source images to a target layout.", 130, 179, 676, 240, "LinLibertineT"),
+                ]}
+        parts = engine.geometric_native_parts(page, set())
+        self.assertIn("Abstract", [part["text"] for part in parts])
+        blocks = [engine.make_block(page, i + 1, part["text"], part.get("start"), part.get("end"))
+                  for i, part in enumerate(parts)]
+        self.assertEqual(blocks[1]["type"], "heading")
+
+    def test_the_last_line_of_a_bold_caption_is_not_read_as_a_heading(self):
+        """The control. A caption's final line is short and bold too.
+
+        What separates it from a heading is that it continues the line above
+        it, so the sentence tests are what make the width rule safe.
+        """
+        def line(text, start, end, y, width):
+            return {"text": text, "start": start, "end": end, "font": "LinLibertineTB", "size": 9.0,
+                    "bbox": engine.make_bbox(72, y, 72 + width, y + 8, "pdf-page-points")}
+        page = {"number": 1, "width": 612, "height": 792, "method": "pdfium-native",
+                "body_font": "LinLibertineT", "text": "", "native_text_lines": [
+                    line("Figure 1: Diffusion-based photomosaics are created by", 0, 52, 700, 240),
+                    line("generating target tiles with a diffusion model, and we", 53, 106, 692, 240),
+                    line("show how", 107, 116, 684, 40),
+                    line("Image mosaics have traditionally been automated.", 117, 164, 676, 240),
+                ]}
+        self.assertNotIn("show how", [part["text"] for part in engine.geometric_native_parts(page, set())])
+
+    def test_a_table_column_heading_is_not_a_heading(self):
+        """Short, capitalised and bold, sitting between two closed sentences.
+
+        Nothing about the line itself separates it from a section heading; what
+        follows it does, because a table's data rows are mostly numbers.
+        """
+        self.assertTrue(engine.looks_like_a_numeric_row("275x276 6.701 640x480 16.044"))
+        self.assertTrue(engine.looks_like_a_numeric_row("SD 0.304 \u2013 0.197 \u2013 \u2013"))
+        self.assertFalse(engine.looks_like_a_numeric_row("Method Score Diff Score Diff Score"))
+        self.assertFalse(engine.looks_like_a_numeric_row("Image mosaics have traditionally been automated"))
+        header = {"differs_from_body": True, "bold": True, "face": "LinLibertineTB",
+                  "precedes_numeric_rows": True}
+        section = {"differs_from_body": True, "bold": True, "face": "LinLibertineTB",
+                   "precedes_numeric_rows": False}
+        self.assertEqual(engine.classify_block("CLIP Score Pick Score MSE", typeface=header)[0], "paragraph")
+        self.assertEqual(engine.classify_block("CLIP Score Pick Score MSE", typeface=section)[0], "heading")
+        # A numbered heading is structure the source states outright, so it
+        # survives even where a table follows it.
+        self.assertEqual(engine.classify_block("5.4 Quantitative Results", typeface=header)[0], "heading")
+
     def test_a_numbered_heading_in_the_body_face_is_separated_and_may_wrap(self):
         """Some papers set a subsection in the plain body face at body size.
 

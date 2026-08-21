@@ -450,6 +450,78 @@ def ocr_parts_with_geometry(page: dict[str, Any], artifacts: set[str]) -> list[d
     return parts or structured_parts_with_spans(page.get("text", ""), artifacts)
 
 
+#: How much narrower than the page's median measured line a bolder line must be
+#: before it is read as standing on its own. Measured rather than chosen: on a
+#: two-column paper the body lines are justified and sit at 1.00x the median,
+#: while "Abstract" and "CCS Concepts" sit at 0.17x and 0.29x.
+SHORT_LINE_FRACTION = 0.5
+
+
+def line_width(line: dict[str, Any]) -> float | None:
+    box = line.get("bbox")
+    if not isinstance(box, dict):
+        return None
+    try:
+        return float(box["x1"]) - float(box["x0"])
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def closes_a_sentence(text: str) -> bool:
+    stripped = text.strip()
+    return bool(stripped) and stripped[-1] in ".!?\u2026"
+
+
+#: How far past a short bold line to look for the numeric rows that would make
+#: it a table's column headings rather than a heading. Four, because a table
+#: commonly carries a second header row and a units row before its data.
+TABLE_LOOKAHEAD = 4
+NUMERIC_TOKEN = re.compile(r"^[-+(\u2013\u2014]?(?:\d[\d.,:%/x\u00d7-]*|[\u2013\u2014])\)?$")
+
+
+def looks_like_a_numeric_row(text: str) -> bool:
+    """A line that is mostly numbers, as a table's data rows are."""
+    tokens = text.split()
+    if len(tokens) < 2:
+        return False
+    numeric = sum(1 for token in tokens if NUMERIC_TOKEN.match(token))
+    return numeric >= 2 and numeric >= len(tokens) / 2
+
+
+def stands_alone_as_short_bold_line(line: dict[str, Any], previous: dict[str, Any] | None,
+                                    following: list[dict[str, Any]], median_width: float | None,
+                                    body_face: str) -> bool:
+    """A short line in a bolder face, between two closed sentences, is a heading.
+
+    The face rule cannot reach these: a paper sets its figure captions in the
+    same bold as its headings, so "Abstract" is absorbed by the caption above
+    it, and it sets the CCS category list in bold too, so "CCS Concepts" is
+    absorbed by the list below it. Neither is a change of face, and the gaps
+    are smaller than a paragraph break, so nothing separated them.
+
+    Width is what separates them, and it is the reason the rule is safe: a
+    heading occupies a fraction of the measure while body text fills it. The
+    sentence tests are what keep the last line of a bold caption -- also short
+    -- from being read the same way, since that line continues the one above it.
+    """
+    face = line.get("font") or ""
+    if not (is_bold_face(face) or _is_bolder_sibling(face, body_face)):
+        return False
+    width = line_width(line)
+    if width is None or not median_width or width >= SHORT_LINE_FRACTION * median_width:
+        return False
+    if previous is not None and not closes_a_sentence(previous["text"]):
+        return False
+    if following and continues_sentence(line["text"], following[0]["text"]):
+        return False
+    # A table's column headings are short and bold and sit between two closed
+    # sentences exactly as a heading does. What separates them is what comes
+    # after: rows of numbers.
+    if any(looks_like_a_numeric_row(entry["text"]) for entry in following[:TABLE_LOOKAHEAD]):
+        return False
+    return True
+
+
 def stands_alone_as_numbered_heading(text: str) -> bool:
     """A line that is a section number and a short phrase, and nothing else.
 
@@ -490,6 +562,9 @@ def geometric_native_parts(page: dict[str, Any], artifacts: set[str]) -> list[di
     lines = page.get("native_text_lines", [])
     if not lines:
         return structured_parts_with_spans(page["text"], artifacts)
+    widths = [width for width in (line_width(line) for line in lines) if width]
+    median_width = statistics.median(widths) if len(widths) >= 4 else None
+    body_face = str(page.get("body_font") or "")
     parts: list[dict[str, Any]] = []
     current: list[dict[str, Any]] = []
 
@@ -506,7 +581,8 @@ def geometric_native_parts(page: dict[str, Any], artifacts: set[str]) -> list[di
             parts.append({"text": value, "start": current[0]["start"], "end": current[-1]["end"]})
         current.clear()
 
-    for line in lines:
+    previous_line: dict[str, Any] | None = None
+    for index, line in enumerate(lines):
         if not line["text"].strip() or normalise_artifact(line["text"]) in artifacts:
             flush()
             continue
@@ -544,8 +620,16 @@ def geometric_native_parts(page: dict[str, Any], artifacts: set[str]) -> list[di
         if numbered[0] and current and prior:
             if continues_sentence(prior["text"], line["text"]):
                 current.append(line)
+                previous_line = line
                 continue
             flush()
+        if stands_alone_as_short_bold_line(line, prior or previous_line,
+                                           lines[index + 1:index + 1 + TABLE_LOOKAHEAD],
+                                           median_width, body_face):
+            flush()
+            parts.append({"text": line["text"].strip(), "start": line["start"], "end": line["end"]})
+            previous_line = line
+            continue
         if current and line.get("font") and prior and prior.get("font") and line["font"] != prior["font"]:
             # ...unless the sentence plainly runs on across it. An italic term
             # opening a definition, or a title inside a bibliography entry,
@@ -555,6 +639,7 @@ def geometric_native_parts(page: dict[str, Any], artifacts: set[str]) -> list[di
             if not continues_sentence(prior["text"], line["text"]):
                 flush()
         current.append(line)
+        previous_line = line
     flush()
     return parts or structured_parts_with_spans(page["text"], artifacts)
 
@@ -1029,7 +1114,10 @@ def classify_block(text: str, prominence: float | None = None, typeface: dict[st
     # cited title -- and the text rule promoted those too. So the measurement
     # grants a heading only where the face is bolder, and refuses everywhere
     # else it was actually taken.
-    set_apart = bool(typeface) and bool(typeface.get("bold"))
+    # ...and a block the page shows to sit above rows of numbers is a table's
+    # column headings, which are short, capitalised and bold exactly as a
+    # heading is. The characters cannot tell the two apart; what follows can.
+    set_apart = bool(typeface) and bool(typeface.get("bold")) and not typeface.get("precedes_numeric_rows")
     measured_as_prose = bool(typeface) and not set_apart and not is_numbered_heading(first_line)
     if (line_count == 1 or prominent) and not measured_as_prose and re.match(r"^(?:\d+(?:\.\d+)*\s+)?[A-Z][A-Za-z0-9 ,:;()/-]{3,}$", first_line) and len(first_line) < 100:
         return "heading", heading_depth(first_line)
@@ -1044,7 +1132,8 @@ def classify_block(text: str, prominence: float | None = None, typeface: dict[st
     if stands_alone_as_numbered_heading(first_line) and line_count <= HEADING_FACE_LINES \
             and len(text.strip()) <= HEADING_FACE_CHARS:
         return "heading", heading_depth(first_line)
-    if typeface and typeface.get("differs_from_body") and typeface.get("bold") and line_count <= HEADING_FACE_LINES:
+    if typeface and typeface.get("differs_from_body") and typeface.get("bold") \
+            and not typeface.get("precedes_numeric_rows") and line_count <= HEADING_FACE_LINES:
         stripped = text.strip()
         if 0 < len(stripped) <= HEADING_FACE_CHARS and not stripped.endswith((".", ";")):
             return "heading", heading_depth(first_line)
@@ -1137,10 +1226,17 @@ def block_typeface(page: dict[str, Any], start: int | None, end: int | None) -> 
     if not faces:
         return None
     face = max(faces.items(), key=lambda item: item[1])[0]
+    # A table's column headings are short and set in the same bold as a
+    # heading, and a change of face isolates them exactly as it isolates one.
+    # What follows is the only thing that separates the two, so the block
+    # carries that with it rather than being judged on its own appearance.
+    after = sorted((line for line in page.get("native_text_lines", []) if line.get("start", -1) >= end),
+                   key=lambda line: line.get("start", 0))[:TABLE_LOOKAHEAD]
     return {
         "face": face,
         "differs_from_body": face != body_face,
         "bold": is_bold_face(face) or _is_bolder_sibling(face, body_face),
+        "precedes_numeric_rows": any(looks_like_a_numeric_row(str(line.get("text", ""))) for line in after),
     }
 
 
