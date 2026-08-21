@@ -5,7 +5,7 @@
 set -euo pipefail
 
 ROOT_DIR="${0:A:h:h}"
-APP_VERSION="0.2.3"
+APP_VERSION="0.2.4"
 cd "${ROOT_DIR}"
 
 # Build from a project virtual environment rather than whatever interpreter is
