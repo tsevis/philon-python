@@ -1719,5 +1719,92 @@ class PageSelectionTest(unittest.TestCase):
                                     cache_policy="bypass", selection=(9,))
 
 
+class IrVersionTest(unittest.TestCase):
+    """The evidence shape is named, and an older one cannot refuse a document."""
+
+    @staticmethod
+    def blank_pdf(path, page_count=1):
+        import pypdfium2 as pdfium
+
+        document = pdfium.PdfDocument.new()
+        for _ in range(page_count):
+            document.new_page(200, 200)
+        document.save(str(path))
+        document.close()
+
+    def test_the_ir_records_the_version_it_was_written_against(self):
+        self.assertEqual(engine.IR_VERSION, "0.3.0")
+
+    def test_an_ir_from_another_version_is_not_accepted(self):
+        ir = {"philon_ir_version": "0.2.0", "pages": [], "blocks": []}
+        with self.assertRaises(ValueError):
+            engine.validate_ir(ir)
+
+    def test_the_cache_entry_is_named_after_the_shape_it_holds(self):
+        entry = engine.cache_path(Path("/cache"), "abc123", "Balanced")
+        self.assertIn(engine.safe_slug(engine.IR_VERSION), entry.name)
+
+    def test_an_entry_written_against_an_older_shape_is_never_reached(self):
+        older = "0.2.0"
+        self.assertNotEqual(
+            engine.cache_path(Path("/cache"), "abc123", "Balanced").name,
+            engine.cache_path(Path("/cache"), "abc123", "Balanced").name.replace(
+                engine.safe_slug(engine.IR_VERSION), engine.safe_slug(older)),
+        )
+
+    def test_an_unreadable_entry_is_recomputed_rather_than_refused(self):
+        """Reuse is an optimisation; a broken one must not refuse a document."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "one.pdf"
+            try:
+                self.blank_pdf(source)
+            except ImportError:
+                self.skipTest("PDFium is not available")
+            cache = root / "cache"
+            cache.mkdir()
+            content_hash = engine.sha256_file(source)
+            entry = engine.cache_path(cache, content_hash, "Balanced")
+            entry.write_text('{"ir": {"philon_ir_version": "0.2.0", "pages": [], "blocks": []},'
+                             ' "warnings": [], "timings": []}', encoding="utf-8")
+
+            result = engine.convert_file(source, "Balanced", root / "exports", cache)
+
+            self.assertFalse(result["cache_hit"])
+            self.assertIn(result["status"], {"completed", "completed_with_warnings"})
+
+    def test_a_corrupt_entry_is_recomputed_too(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "one.pdf"
+            try:
+                self.blank_pdf(source)
+            except ImportError:
+                self.skipTest("PDFium is not available")
+            cache = root / "cache"
+            cache.mkdir()
+            entry = engine.cache_path(cache, engine.sha256_file(source), "Balanced")
+            entry.write_text("{ this is not json", encoding="utf-8")
+
+            result = engine.convert_file(source, "Balanced", root / "exports", cache)
+
+            self.assertFalse(result["cache_hit"])
+
+    def test_a_sound_entry_is_still_reused(self):
+        """The control: recomputing must not become the only path."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "one.pdf"
+            try:
+                self.blank_pdf(source)
+            except ImportError:
+                self.skipTest("PDFium is not available")
+            cache = root / "cache"
+            first = engine.convert_file(source, "Balanced", root / "exports", cache)
+            second = engine.convert_file(source, "Balanced", root / "exports", cache)
+            self.assertFalse(first["cache_hit"])
+            self.assertTrue(second["cache_hit"])
+
+
 if __name__ == "__main__":
     unittest.main()

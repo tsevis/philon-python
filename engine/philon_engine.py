@@ -35,7 +35,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
-IR_VERSION = "0.2.0"
+#: The shape of the evidence an export carries. Raised when a field is added
+#: or changed, independently of the application version and of the engine
+#: contract, so a consumer can tell what it is reading. 0.3.0 added the page's
+#: own /Rotate, the source-declared links measured onto a block, and the page
+#: selection a conversion covers.
+IR_VERSION = "0.3.0"
 ENGINE_VERSION = "philon-0.2.0"
 MAX_INPUT_BYTES = 500 * 1024 * 1024
 MAX_PDF_PAGES = 2_000
@@ -2833,9 +2838,15 @@ def write_outputs(ir: dict[str, Any], warnings: list[WarningRecord], timings: li
 
 
 def cache_path(cache_dir: Path, content_hash: str, profile: str, selection: tuple[int, ...] | None = None) -> Path:
+    """Name a cache entry after everything that decides what is inside it.
+
+    The entry holds an IR, so it carries the IR's version: an engine that
+    records a different evidence shape never reaches an entry written against
+    the old one, rather than reading it and having to reject it.
+    """
     token = page_selection_token(selection)
     suffix = f"-{token}" if token else ""
-    return cache_dir / f"{content_hash}-{profile.lower()}-{safe_slug(ENGINE_VERSION)}{suffix}.json"
+    return cache_dir / f"{content_hash}-{profile.lower()}-{safe_slug(ENGINE_VERSION)}-ir{safe_slug(IR_VERSION)}{suffix}.json"
 
 
 def convert_file(path: Path, profile: str, output_root: Path, cache_root: Path, cache_policy: str = "use", outputs: Iterable[str] | None = None, progress: Any | None = None, selection: tuple[int, ...] | None = None) -> dict[str, Any]:
@@ -2852,14 +2863,24 @@ def convert_file(path: Path, profile: str, output_root: Path, cache_root: Path, 
         raise ValueError("Cache policy must be use, bypass, or refresh.")
     content_hash = sha256_file(path)
     cache_file = cache_path(cache_root, content_hash, profile, selection)
-    cached = cache_policy == "use" and cache_file.exists()
+    cached = False
+    if cache_policy == "use" and cache_file.exists():
+        try:
+            payload = json.loads(cache_file.read_text(encoding="utf-8"))
+            ir = payload["ir"]
+            warnings = [WarningRecord(**warning) for warning in payload["warnings"]]
+            timings = [Timing(**timing) for timing in payload["timings"]]
+            validate_ir(ir)
+            cached = True
+        except (OSError, ValueError, KeyError, TypeError):
+            # An entry that cannot be read back, or that this engine no longer
+            # recognises, is not evidence of anything. It is recomputed from the
+            # source rather than failing a conversion the source still supports:
+            # reuse is an optimisation, and a broken optimisation must not be
+            # able to refuse a document.
+            cached = False
     if cached:
         report("cache", 28, "Reusing verified local conversion data")
-        payload = json.loads(cache_file.read_text(encoding="utf-8"))
-        ir = payload["ir"]
-        warnings = [WarningRecord(**warning) for warning in payload["warnings"]]
-        timings = [Timing(**timing) for timing in payload["timings"]]
-        validate_ir(ir)
     else:
         report("extracting", 22, "Extracting source structure locally")
         ir, warnings, timings = make_ir(path, profile, selection)
