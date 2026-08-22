@@ -1334,5 +1334,81 @@ class PhilonEngineTest(unittest.TestCase):
         self.assertEqual(result["vectors"][1]["embedding"], [0.3, 0.4])
 
 
+class PageRotationTest(unittest.TestCase):
+    """A rotated page is measured in the frame it is displayed and reviewed in."""
+
+    @staticmethod
+    def rotated_pdf(path, rotation):
+        """One line of Helvetica at a known place, under a chosen /Rotate."""
+        content = b"BT /F1 24 Tf 72 700 Td (Rotation probe line) Tj ET\n"
+        objects = [
+            b"<< /Type /Catalog /Pages 2 0 R >>",
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            (f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Rotate {rotation} "
+             "/Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>").encode(),
+            b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+            b"<< /Length " + str(len(content)).encode() + b" >>\nstream\n" + content + b"endstream",
+        ]
+        out = bytearray(b"%PDF-1.4\n")
+        offsets = []
+        for number, body in enumerate(objects, start=1):
+            offsets.append(len(out))
+            out += f"{number} 0 obj\n".encode() + body + b"\nendobj\n"
+        start_xref = len(out)
+        out += f"xref\n0 {len(objects) + 1}\n".encode() + b"0000000000 65535 f \n"
+        for offset in offsets:
+            out += f"{offset:010d} 00000 n \n".encode()
+        out += (f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\n"
+                f"startxref\n{start_xref}\n").encode() + b"%%EOF\n"
+        Path(path).write_bytes(bytes(out))
+
+    def test_source_page_size_transposes_only_a_quarter_turn(self):
+        self.assertEqual(engine.source_page_size(612, 792, 0), (612, 792))
+        self.assertEqual(engine.source_page_size(792, 612, 90), (612, 792))
+        self.assertEqual(engine.source_page_size(612, 792, 180), (612, 792))
+        self.assertEqual(engine.source_page_size(792, 612, 270), (612, 792))
+
+    def test_a_quarter_turn_moves_a_rectangle_and_keeps_its_size(self):
+        box = engine.make_bbox(72, 700, 272, 722, "pdf-page-points")
+        turned = engine.bbox_to_displayed_frame(box, 90, 612, 792)
+        # The page is 612 wide unrotated, so it is 612 tall once displayed, and
+        # a rectangle 200 by 22 becomes 22 by 200 without changing size.
+        self.assertEqual((turned["x0"], turned["y0"]), (700, 612 - 272))
+        self.assertEqual((turned["x1"], turned["y1"]), (722, 612 - 72))
+        self.assertAlmostEqual(turned["x1"] - turned["x0"], box["y1"] - box["y0"])
+        self.assertAlmostEqual(turned["y1"] - turned["y0"], box["x1"] - box["x0"])
+
+    def test_an_unrotated_page_is_left_exactly_as_measured(self):
+        box = engine.make_bbox(72, 700, 272, 722, "pdf-page-points")
+        self.assertIs(engine.bbox_to_displayed_frame(box, 0, 612, 792), box)
+        self.assertIsNone(engine.bbox_to_displayed_frame(None, 90, 612, 792))
+
+    def test_a_half_turn_is_its_own_inverse(self):
+        box = engine.make_bbox(72, 700, 272, 722, "pdf-page-points")
+        once = engine.bbox_to_displayed_frame(box, 180, 612, 792)
+        twice = engine.bbox_to_displayed_frame(once, 180, 612, 792)
+        self.assertEqual((twice["x0"], twice["y0"], twice["x1"], twice["y1"]),
+                         (box["x0"], box["y0"], box["x1"], box["y1"]))
+
+    def test_measured_text_stays_inside_a_rotated_page(self):
+        """The defect this fixes: the rectangle fell outside the page box."""
+        with tempfile.TemporaryDirectory() as directory:
+            for rotation in (0, 90, 180, 270):
+                source = Path(directory) / f"rotate{rotation}.pdf"
+                self.rotated_pdf(source, rotation)
+                pages, _ = engine.pdfium_extract(source)
+                if not pages or pages[0].get("method") != "pdfium-native":
+                    self.skipTest("PDFium is not available for extraction")
+                page = pages[0]
+                self.assertEqual(page["rotation"], rotation)
+                measured = [line["bbox"] for line in page["native_text_lines"] if line["bbox"]]
+                self.assertTrue(measured, f"no rectangle measured at /Rotate {rotation}")
+                for box in measured:
+                    self.assertGreaterEqual(box["x0"], 0)
+                    self.assertGreaterEqual(box["y0"], 0)
+                    self.assertLessEqual(box["x1"], page["width"] + 1)
+                    self.assertLessEqual(box["y1"], page["height"] + 1)
+
+
 if __name__ == "__main__":
     unittest.main()

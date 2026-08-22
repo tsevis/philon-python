@@ -722,6 +722,53 @@ def union_bboxes(boxes: Iterable[dict[str, Any]]) -> dict[str, Any] | None:
     )
 
 
+def source_page_size(displayed_width: float, displayed_height: float, rotation: int) -> tuple[float, float]:
+    """The page's own unrotated size, which is the frame PDFium measures text in."""
+    if rotation % 360 in (90, 270):
+        return displayed_height, displayed_width
+    return displayed_width, displayed_height
+
+
+def rotate_point_to_displayed_frame(x: float, y: float, rotation: int, source_width: float, source_height: float) -> tuple[float, float]:
+    """Turn one point by the page's own /Rotate, bottom-left origin throughout."""
+    turn = rotation % 360
+    if turn == 90:
+        return y, source_width - x
+    if turn == 180:
+        return source_width - x, source_height - y
+    if turn == 270:
+        return source_height - y, x
+    return x, y
+
+
+def bbox_to_displayed_frame(box: dict[str, Any] | None, rotation: int, source_width: float, source_height: float) -> dict[str, Any] | None:
+    """Move a measured rectangle from the page's own frame into the displayed one.
+
+    PDFium reports text rectangles in the page's unrotated coordinates, but it
+    reports page size -- and renders previews -- with /Rotate already applied.
+    Recorded together and unreconciled the two disagree on every rotated page:
+    a rectangle sits outside the page box it is measured against, the evidence
+    overlay draws it away from the text it marks, and the reading-order check
+    compares the axis the page is no longer read along. Everything downstream
+    is expressed in the displayed frame, because that is the one a reviewer
+    sees on the source panel, so the measurement is moved into it here rather
+    than left for each consumer to guess about.
+    """
+    if not box or rotation % 360 == 0:
+        return box
+    corners = [
+        rotate_point_to_displayed_frame(float(box["x0"]), float(box["y0"]), rotation, source_width, source_height),
+        rotate_point_to_displayed_frame(float(box["x1"]), float(box["y0"]), rotation, source_width, source_height),
+        rotate_point_to_displayed_frame(float(box["x1"]), float(box["y1"]), rotation, source_width, source_height),
+        rotate_point_to_displayed_frame(float(box["x0"]), float(box["y1"]), rotation, source_width, source_height),
+    ]
+    return make_bbox(
+        min(point[0] for point in corners), min(point[1] for point in corners),
+        max(point[0] for point in corners), max(point[1] for point in corners),
+        str(box["coordinate_space"]),
+    )
+
+
 def language_hint(text: str) -> str:
     if not text.strip():
         return "und"
@@ -909,6 +956,11 @@ def pdfium_extract(path: Path) -> tuple[list[dict[str, Any]], list[WarningRecord
         for index in range(len(document)):
             page = document[index]
             width, height = page.get_size()
+            # PDFium's page size already has /Rotate applied; its text
+            # rectangles do not. Measure the source frame so they can be
+            # reconciled before either is recorded.
+            rotation = int(page.get_rotation() or 0)
+            source_width, source_height = source_page_size(width, height, rotation)
             textpage = page.get_textpage()
             extracted_text = textpage.get_text_range()
             leading_trim = len(extracted_text) - len(extracted_text.lstrip())
@@ -926,12 +978,16 @@ def pdfium_extract(path: Path) -> tuple[list[dict[str, Any]], list[WarningRecord
                 end = start + len(line_text)
                 if start < 0 or end > len(text):
                     continue
-                bbox = pdfium_span_bbox(textpage, line_start, len(line_text))
+                bbox = bbox_to_displayed_frame(
+                    pdfium_span_bbox(textpage, line_start, len(line_text)),
+                    rotation, source_width, source_height,
+                )
                 face, size = line_typeface(textpage, line_start, len(line_text), extracted_text)
                 line_spans.append({"text": line_text, "start": start, "end": end, "bbox": bbox, "font": face, "size": size})
                 spans.append({"start": start, "end": end, "bbox": bbox})
             pages.append({
                 "number": index + 1, "width": width, "height": height, "text": text,
+                "rotation": rotation,
                 "method": "pdfium-native", "native_text_spans": spans, "native_text_lines": line_spans,
             })
             textpage.close()
@@ -1521,6 +1577,7 @@ def make_ir(path: Path, profile: str) -> tuple[dict[str, Any], list[WarningRecor
             "number": source_page["number"],
             "width": source_page["width"],
             "height": source_page["height"],
+            "rotation": source_page.get("rotation", 0),
             "method": source_page["method"],
             "confidence": confidence,
             "route": route_for_page(source_page, health),
