@@ -128,6 +128,30 @@
     },
     {
       "type": "library",
+      "name": "@phosphor-icons/react",
+      "version": "2.1.10",
+      "scope": "required",
+      "purl": "pkg:npm/%40phosphor-icons/react@2.1.10",
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "philon:distribution",
+          "value": "shipped"
+        },
+        {
+          "name": "philon:vendored-as",
+          "value": "philon_desktop/gui/phosphor_data.py (icon path data only, generated; no runtime dependency)"
+        }
+      ]
+    },
+    {
+      "type": "library",
       "name": "PyInstaller",
       "version": "6.18.0",
       "scope": "excluded",

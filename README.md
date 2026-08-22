@@ -6,7 +6,7 @@ The application is local-first and offline by default. It has no cloud providers
 
 ## What is included
 
-- Native **Single Job** and **Batch** workspaces, with Library, Models, Diagnostics, and Settings as secondary navigation.
+- The source macOS application's GUI, ported panel for panel: header navigation with a Library count badge, the workspace command bar with **Single Job** and **Batch** job tabs, the three-column conversion grid, batch queue/report, Library, Models, Diagnostics and Settings workspaces, the first-launch splash, and light/dark appearances that follow the system.
 - The canonical PDFium/Python conversion engine: bounded PDF/image preflight, native extraction, adaptive Apple Vision routing, source geometry, confidence, warnings, citations, cross-page tables, and evidence retention.
 - Markdown, semantic HTML, Philon IR, clean-room Marker-style JSON, chunks, optional verified BGE-M3 embeddings, source assets, CSV tables, evidence reports, previews/overlays, and hashed output manifests.
 - A page preview with page navigation, fit/actual-size controls, selected-block source-region overlays, block review/editing, retained candidates, and source-crop opening for manual repair candidates.

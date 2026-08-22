@@ -25,6 +25,24 @@ class LocalStoreTest(unittest.TestCase):
             recovered = LocalStore(Path(directory))
             self.assertEqual(recovered.batch_items(batch_id)[0]["status"], "queued")
 
+    def test_clear_jobs_removes_history_and_reports_the_count(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = LocalStore(Path(directory))
+            store.store_job({"id": "job-1", "created_at": "2026-08-21T00:00:00+00:00", "profile": "Balanced", "results": [], "failures": []})
+            store.store_job({"id": "job-2", "created_at": "2026-08-21T00:00:01+00:00", "profile": "Fast", "results": [], "failures": []})
+            self.assertEqual(store.clear_jobs(), 2)
+            self.assertEqual(store.list_jobs(), [])
+            self.assertEqual(store.clear_jobs(), 0)
+
+    def test_preferences_carry_enabled_model_ids_and_reject_bad_ones(self):
+        with tempfile.TemporaryDirectory() as directory:
+            service = PhilonService(Path(directory))
+            self.assertEqual(service.preferences()["enabled_model_ids"], [])
+            service.save_preferences({"profile": "Balanced", "cache_policy": "use", "outputs": ["ir"], "enabled_model_ids": ["qwen3.8-27b-local-repair"]})
+            self.assertEqual(service.preferences()["enabled_model_ids"], ["qwen3.8-27b-local-repair"])
+            with self.assertRaises(ValueError):
+                service.save_preferences({"profile": "Balanced", "cache_policy": "use", "outputs": ["ir"], "enabled_model_ids": [3]})
+
     def test_preferences_reject_empty_output_set(self):
         with tempfile.TemporaryDirectory() as directory:
             service = PhilonService(Path(directory))
