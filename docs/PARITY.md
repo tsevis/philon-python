@@ -34,6 +34,7 @@ the two copies is the check that says whether that happened.
 | Native PDF/OCR adaptive routing | Implemented; Apple Vision runtime gated | Canonical PDFium extraction, native-text health, per-page routes and adaptive DPI retained. Packaged macOS build compiles the Apple Vision helper; runtime is explicitly unavailable without it. |
 | Evidence and source provenance | Implemented and verified | Block IDs, coordinates, confidence, route, warnings, alternatives, repair history, source crops, overlay exports and manifests retained. |
 | Philon IR version | 0.3.0 in both | The one number the two projects may not drift on: it names the evidence shape a consumer reads, and `validate_ir` refuses any other. 0.3.0 added the page's own `/Rotate`, the source-declared links measured onto each block, and the page selection a conversion covers. A cache entry is named after the IR version it holds, so an entry written against 0.2.0 is never reached rather than read and rejected. |
+| Rotated pages, running heads, source links, page ranges | Implemented in both | Four engine fixes carried identically in each copy. A rotated page is measured in the frame it is displayed in, rather than page size with `/Rotate` applied and text rectangles without it. A running head carrying its folio is recognised as repeating. Link annotations are measured onto the characters they cover, and only http, https and mailto become clickable. A job converts a page range, which is part of the cache key and the export directory name. `diff` over the two engine copies still reports one hunk. |
 | IR 0.3.0 evidence in the interface | Implemented | The page-selection control asks for a range the engine already converts, refusing a malformed one before a job starts; the evidence summary reports the page's own rotation and the source-declared links measured onto the selected block, including a target withheld as unanchorable. |
 | Output formats | Implemented and verified | Markdown, semantic HTML, IR, page-tree interchange JSON, chunks, optional embeddings, image assets, CSV, evidence and manifest. |
 | Source/output/review UI | Implemented and smoke-tested | Fit/actual-size, zoomable source preview, page navigation, PDF/normalized-image overlays, block selection, in-app edit, candidate restore, repair request and crop access. |
@@ -48,11 +49,13 @@ the two copies is the check that says whether that happened.
 |---|---|
 | Canonical engine + fuzz + benchmark suite | 141 passed, 2 Apple Vision integration tests skipped because the helper was not enabled in this validation session. |
 | Desktop persistence unit tests | 5 passed (queue recovery, history clean-up, preference validation incl. enabled model ids). |
+| Desktop shutdown tests | 2 passed; 37 desktop tests in total, all off-screen. |
 | Desktop GUI shell tests | 30 passed off-screen: theme tokens, icon set, shell structure, splash gating, preference round-trips, the ported composition helpers, the interface face resolving to a family that is installed, the page-selection control, and the rotation and source-link evidence rows. |
 | Policy/SBOM checks | Local-only, licence, and SBOM policies passed. |
-| Desktop startup | Qt application constructed off-screen; six native workspace/secondary pages available. |
-| Single-document end-to-end | Generated local PDF passed preflight; Verified conversion produced 2 evidence-linked blocks, a preview raster and a copied 10-file export bundle. The unavailable local BGE runtime emitted `EMBEDDING_FAILED` instead of aborting conversion. |
+| Desktop startup | Qt application constructed off-screen with five agreeing views. The check asserts that the stack, the ordered names and the header tabs describe the same set, rather than a fixed page count, so a view added to one and forgotten in the others is caught. It applies the interface face first, as `main()` does. |
+| Single-document end-to-end | A generated four-page PDF, one page at `/Rotate 90` and one carrying a link annotation, converted under Verified: completed with no warnings, 4 pages, 7 evidence-linked blocks, rotation recorded as `[0, 0, 90, 0]`, one link measured onto the characters it covers, and 8 outputs written. |
 | Batch end-to-end | Two generated local PDFs completed from the SQLite queue; history entry persisted. |
+| Page selection end-to-end | The same document converted for pages `2-3` reported `page_selection: 2-3` and an IR carrying pages `[2, 3]`, into an export directory suffixed `-pages-2-3` so it cannot be mistaken for, or written over, the whole-document conversion. |
 
 ## Explicit external gates and intentional exclusions
 
