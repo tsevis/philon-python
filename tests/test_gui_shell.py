@@ -33,7 +33,8 @@ def sample_document() -> dict:
         "id": "doc-1",
         "source_path": "/tmp/sample.pdf",
         "cache_hit": False,
-        "pages": [{"id": "page-1", "number": 1, "width": 612, "height": 792, "rotation": 90, "route": {"decision": "native-text"}}],
+        "pages": [{"id": "page-1", "number": 1, "width": 612, "height": 792, "rotation": 90, "route": {"decision": "native-text"},
+                   "ruled_tables": [{"bbox": None, "row_count": 3, "column_count": 3, "complete": True, "crossing_count": 16}]}],
         "blocks": [
             {
                 "id": "block-1", "page": "page-1", "type": "heading", "level": 1, "text": "A Study of Readings",
@@ -46,6 +47,12 @@ def sample_document() -> dict:
             {
                 "id": "block-2", "page": "page-1", "type": "paragraph", "text": "Body text of the study.",
                 "source": {"method": "native-text", "confidence": 0.91}, "evidence": {"alternatives": []},
+            },
+            {
+                "id": "block-3", "page": "page-1", "type": "table", "text": "Region Q1\nNorth 14",
+                "source": {"method": "native-text", "confidence": 0.99}, "evidence": {"alternatives": []},
+                "table": {"rows": [["Region", "Q1"], ["North", "14"]], "row_count": 2, "column_count": 2,
+                          "source": "ruled-geometry"},
             },
         ],
         "warnings": [{"code": "LOW_CONFIDENCE", "message": "One region needs review.", "severity": "warning"}],
@@ -96,8 +103,8 @@ class ShellTest(unittest.TestCase):
         self.window.single_path = "/tmp/sample.pdf"
         self.window._refresh_workspace()
         self.assertEqual(self.window.source_panel.title.full_text(), "sample.pdf")
-        self.assertEqual(self.window.output_panel.footer_note.text(), "2 evidence-linked blocks")
-        self.assertEqual(len(self.window.output_panel.rendered.blocks), 2)
+        self.assertEqual(self.window.output_panel.footer_note.text(), "3 evidence-linked blocks")
+        self.assertEqual(len(self.window.output_panel.rendered.blocks), 3)
         self.assertTrue(self.window.export_button.isVisibleTo(self.window))
         self.window.output_panel.set_format("IR")
         self.assertIn('"block-1"', self.window.output_panel.text_output.toPlainText())
@@ -263,6 +270,29 @@ class EvidenceForNewFieldsTest(unittest.TestCase):
         text = self.summary_text(self.panel)
         self.assertIn("1 anchored", text)
         self.assertIn("withheld", text)
+
+    def test_a_recovered_table_is_named_on_the_block_it_was_recovered_for(self):
+        self.panel.set_document(sample_document(), "block-3")
+        self.assertIn("2 × 2 recovered from ruled geometry", self.summary_text(self.panel))
+
+    def test_a_page_that_ruled_a_table_says_so_on_a_block_that_is_not_one(self):
+        self.panel.set_document(sample_document(), "block-1")
+        self.assertIn("1 recovered on this page", self.summary_text(self.panel))
+
+    def test_the_summary_reads_for_each_shape_of_ruled_evidence(self):
+        from philon_desktop.gui.evidence_panel import ruled_table_summary
+
+        self.assertEqual(ruled_table_summary(None, None), "None ruled")
+        self.assertEqual(ruled_table_summary(None, {"ruled_tables": []}), "None ruled")
+        self.assertEqual(ruled_table_summary({"table": {"row_count": 3, "column_count": 4}}, None),
+                         "3 × 4 recovered from ruled geometry")
+        self.assertEqual(ruled_table_summary(None, {"ruled_tables": [{"complete": True}, {"complete": True}]}),
+                         "2 recovered on this page")
+        # A lattice Philon refused to complete is reported, not dropped.
+        self.assertEqual(ruled_table_summary(None, {"ruled_tables": [{"complete": False}]}),
+                         "1 ruled, none closing into a full grid")
+        self.assertEqual(ruled_table_summary(None, {"ruled_tables": [{"complete": True}, {"complete": False}]}),
+                         "1 recovered, 1 not closed")
 
     def test_the_summary_reads_for_each_shape_of_link_evidence(self):
         from philon_desktop.gui.evidence_panel import link_summary

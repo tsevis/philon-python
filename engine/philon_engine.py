@@ -39,8 +39,10 @@ from typing import Any, Iterable
 #: or changed, independently of the application version and of the engine
 #: contract, so a consumer can tell what it is reading. 0.3.0 added the page's
 #: own /Rotate, the source-declared links measured onto a block, and the page
-#: selection a conversion covers.
-IR_VERSION = "0.3.0"
+#: selection a conversion covers. 0.4.0 added the tables recovered from the
+#: rules a page draws: each page's `ruled_tables` records the grids measured on
+#: it, and a block enclosed by one carries the cells they prove in `table`.
+IR_VERSION = "0.4.0"
 ENGINE_VERSION = "philon-0.2.0"
 MAX_INPUT_BYTES = 500 * 1024 * 1024
 MAX_PDF_PAGES = 2_000
@@ -477,6 +479,30 @@ def table_rows(text: str) -> list[list[str]] | None:
     return rows
 
 
+def markdown_table_cell(value: str) -> str:
+    """Make one cell safe to sit between Markdown's own column separators.
+
+    A recovered cell is whatever the page put in it, and a pipe inside one
+    would silently split it into two columns and misalign every row after it.
+    """
+    return str(value).replace("\\", "\\\\").replace("|", "\\|")
+
+
+def block_table_rows(block: dict[str, Any]) -> list[list[str]] | None:
+    """The rows a table block has, preferring the ones its page proved.
+
+    Rules recovered from the page's own drawing outrank the delimited reading
+    of the block's text: the rules are what the producer used to separate the
+    columns, while a delimiter is a character that happens to sit between them.
+    A ruled table usually has no delimiter at all, so for those two readings
+    this is not a tie-break but the only answer.
+    """
+    recovered = (block.get("table") or {}).get("rows")
+    if recovered:
+        return [list(row) for row in recovered]
+    return table_rows(str(block.get("text", "")))
+
+
 def structured_parts(text: str, artifacts: set[str]) -> list[str]:
     lines = text.splitlines()
     retained = [line for line in lines if normalise_artifact(line) not in artifacts]
@@ -712,12 +738,29 @@ def geometric_native_parts(page: dict[str, Any], artifacts: set[str]) -> list[di
     body_face = str(page.get("body_font") or "")
     parts: list[dict[str, Any]] = []
     current: list[dict[str, Any]] = []
+    #: The tables this page was measured to have ruled, and whose cells its own
+    #: geometry therefore proves. An incomplete lattice is deliberately absent:
+    #: it is reported as uncertainty and never assembled into a block.
+    ruled = [table for table in page.get("ruled_tables", []) if table.get("complete") and table.get("bbox")]
 
     #: Whether the block being assembled was opened by a numbered heading line.
     #: A list, so the nested flush() can clear it without a nonlocal binding.
     numbered = [False]
     #: ...and whether it was opened by a float's caption line.
     floating = [False]
+
+    def enclosing_table(line: dict[str, Any]) -> int | None:
+        """Which ruled table a measured line sits inside, by its own centre."""
+        box = line.get("bbox")
+        if not box or not ruled:
+            return None
+        x = (float(box["x0"]) + float(box["x1"])) / 2
+        y = (float(box["y0"]) + float(box["y1"])) / 2
+        for index, table in enumerate(ruled):
+            rect = table["bbox"]
+            if rect["x0"] <= x <= rect["x1"] and rect["y0"] <= y <= rect["y1"]:
+                return index
+        return None
 
     def flush() -> None:
         numbered[0] = False
@@ -729,8 +772,39 @@ def geometric_native_parts(page: dict[str, Any], artifacts: set[str]) -> list[di
             parts.append({"text": value, "start": current[0]["start"], "end": current[-1]["end"]})
         current.clear()
 
+    # Each table is gathered whole before the walk begins, rather than
+    # accumulated as its lines are met. A table's lines need not arrive in one
+    # unbroken run -- a line whose centre falls just outside the rules, or a
+    # caption PDFium reads mid-table, interrupts it -- and a segmenter that
+    # closed the block at the interruption emitted the table twice, each copy
+    # carrying the full set of recovered rows into Markdown and into the CSV.
+    owners = [enclosing_table(line) for line in lines]
+    table_lines: dict[int, list[dict[str, Any]]] = {}
+    for owner, line in zip(owners, lines):
+        if owner is not None and line["text"].strip():
+            table_lines.setdefault(owner, []).append(line)
+    emitted: set[int] = set()
+
     previous_line: dict[str, Any] | None = None
     for index, line in enumerate(lines):
+        # A ruled table is decided before any other rule looks at the line. Its
+        # cells hold exactly the short, capitalised, numeric lines the heading
+        # and page-marker rules are built to catch, and a cell taken for a
+        # heading -- or a lone "14" discarded as a page number -- is a hole in
+        # a table the page drew in full.
+        owner = owners[index]
+        if owner is not None:
+            flush()
+            grouped = table_lines.get(owner)
+            if owner not in emitted and grouped:
+                emitted.add(owner)
+                parts.append({
+                    "text": "\n".join(entry["text"] for entry in grouped).strip(),
+                    "start": grouped[0]["start"], "end": grouped[-1]["end"],
+                    "table_rows": ruled[owner]["rows"], "table_bbox": ruled[owner]["bbox"],
+                })
+            previous_line = line
+            continue
         if not line["text"].strip() or normalise_artifact(line["text"]) in artifacts:
             flush()
             continue
@@ -885,6 +959,327 @@ def bbox_to_displayed_frame(box: dict[str, Any] | None, rotation: int, source_wi
     )
 
 
+#: A drawn rule is thin. Two and a half points is a heavy rule in print and
+#: still well under the height of a line of text, so anything thicker is
+#: something the page means to be looked at rather than a table's edge.
+RULE_MAX_THICKNESS_POINTS = 2.5
+#: ...and long. Below about one character's width a thin mark is a glyph
+#: fragment, an underscore or a bullet, none of which bound a cell.
+RULE_MIN_LENGTH_POINTS = 12.0
+#: Rules meant as one line are rarely placed on one coordinate: a producer that
+#: draws a border per cell emits a rectangle per cell, each a fraction of a
+#: point off its neighbour.
+RULE_POSITION_TOLERANCE_POINTS = 2.0
+#: A rule may stop a hair short of the one it meets, or overshoot it. Both are
+#: still a crossing; neither is a rule that merely passes nearby.
+RULE_CROSSING_TOLERANCE_POINTS = 2.0
+#: Guards against pages that are drawings rather than documents. A map or a
+#: vector chart can carry tens of thousands of paths and hundreds of collinear
+#: thin ones, and pairing every line with every other is quadratic. Past these
+#: counts the page is not a ruled table and is left alone.
+MAX_SCANNED_PATH_OBJECTS = 20_000
+MAX_RULES_PER_AXIS = 2_000
+MAX_RULE_LINES_PER_AXIS = 200
+
+
+def rule_from_bbox(box: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Read one drawn rectangle as a horizontal rule, a vertical rule, or neither.
+
+    The rectangle is a path object's *bounds*, not its segments. Many producers
+    draw a rule as a thin filled rectangle rather than as a stroked line, and a
+    reader that parses segments sees the fill and misses the rule; bounds see
+    both, and a rule is fully described by where it is and how far it runs.
+    """
+    if not box:
+        return None
+    x0, y0 = float(box["x0"]), float(box["y0"])
+    x1, y1 = float(box["x1"]), float(box["y1"])
+    width, height = x1 - x0, y1 - y0
+    if height <= RULE_MAX_THICKNESS_POINTS and width >= RULE_MIN_LENGTH_POINTS:
+        return {"axis": "horizontal", "position": (y0 + y1) / 2, "start": x0, "end": x1}
+    if width <= RULE_MAX_THICKNESS_POINTS and height >= RULE_MIN_LENGTH_POINTS:
+        return {"axis": "vertical", "position": (x0 + x1) / 2, "start": y0, "end": y1}
+    return None
+
+
+def cluster_positions(values: Iterable[float], tolerance: float) -> list[float]:
+    """Collapse near-equal rule positions onto one line each.
+
+    Each returned position is the mean of the cluster it stands for, so a line
+    is placed where its rules actually are rather than on whichever of them was
+    read first.
+    """
+    ordered = sorted(float(value) for value in values)
+    if not ordered:
+        return []
+    clusters: list[list[float]] = [[ordered[0]]]
+    for value in ordered[1:]:
+        if value - clusters[-1][-1] <= tolerance:
+            clusters[-1].append(value)
+        else:
+            clusters.append([value])
+    return [round(statistics.fmean(cluster), 4) for cluster in clusters]
+
+
+def merge_rules(rules: list[dict[str, Any]], tolerance: float) -> list[dict[str, Any]]:
+    """One line per cluster of rules, keeping the separate runs it is drawn in.
+
+    The runs are kept rather than unioned into one extent. A table drawn with a
+    border per cell produces a row of touching segments, which union harmlessly;
+    two tables side by side produce two runs at the same height with a gap
+    between them, and a union would claim a rule across the gap that the page
+    never drew -- and with it a crossing, and with that a grid spanning both.
+    """
+    merged = [
+        {"position": position, "segments": []}
+        for position in cluster_positions([rule["position"] for rule in rules], tolerance)
+    ]
+    if not merged:
+        return []
+    for rule in rules:
+        nearest = min(merged, key=lambda line: abs(line["position"] - rule["position"]))
+        nearest["segments"].append((float(rule["start"]), float(rule["end"])))
+    lines = []
+    for line in merged:
+        if not line["segments"]:
+            continue
+        line["start"] = min(start for start, _ in line["segments"])
+        line["end"] = max(end for _, end in line["segments"])
+        lines.append(line)
+    return lines
+
+
+def rules_cross(along: dict[str, Any], across: dict[str, Any], tolerance: float) -> bool:
+    """Whether two lines on opposite axes actually meet, run against run."""
+    return (
+        any(start - tolerance <= across["position"] <= end + tolerance for start, end in along["segments"])
+        and any(start - tolerance <= along["position"] <= end + tolerance for start, end in across["segments"])
+    )
+
+
+def ruled_table_grids(horizontals: list[dict[str, Any]], verticals: list[dict[str, Any]],
+                      tolerance: float = RULE_CROSSING_TOLERANCE_POINTS) -> list[dict[str, Any]]:
+    """Find the grids in a page's rules: where two lines cross two others.
+
+    Crossing is what makes a grid provable. Rules that meet enclose cells;
+    rules that merely share a page do not, so the crossings are followed as a
+    graph and each connected group is one candidate. Two tables on one page
+    share no crossing and stay two candidates.
+
+    A group in which every horizontal meets every vertical is a complete
+    lattice, and the cells it encloses are proven by the page's own drawing. A
+    group missing crossings describes a shape the lines alone do not determine
+    -- a merged cell, a rule drawn only under the headings, a figure's axes --
+    so it is returned marked incomplete, to be reported rather than emitted.
+    """
+    if len(horizontals) > MAX_RULE_LINES_PER_AXIS or len(verticals) > MAX_RULE_LINES_PER_AXIS:
+        return []
+    crossings = {
+        (h_index, v_index)
+        for h_index, horizontal in enumerate(horizontals)
+        for v_index, vertical in enumerate(verticals)
+        if rules_cross(horizontal, vertical, tolerance)
+    }
+    meets_vertical: dict[int, set[int]] = {index: set() for index in range(len(horizontals))}
+    meets_horizontal: dict[int, set[int]] = {index: set() for index in range(len(verticals))}
+    for h_index, v_index in crossings:
+        meets_vertical[h_index].add(v_index)
+        meets_horizontal[v_index].add(h_index)
+
+    grids: list[dict[str, Any]] = []
+    assigned: set[int] = set()
+    for first in range(len(horizontals)):
+        if first in assigned or not meets_vertical[first]:
+            continue
+        group_h: set[int] = set()
+        group_v: set[int] = set()
+        pending = [("h", first)]
+        while pending:
+            axis, index = pending.pop()
+            if axis == "h" and index not in group_h:
+                group_h.add(index)
+                pending.extend(("v", other) for other in meets_vertical[index])
+            elif axis == "v" and index not in group_v:
+                group_v.add(index)
+                pending.extend(("h", other) for other in meets_horizontal[index])
+        assigned |= group_h
+        if len(group_h) < 2 or len(group_v) < 2:
+            continue
+        row_lines = sorted(horizontals[index]["position"] for index in group_h)
+        column_lines = sorted(verticals[index]["position"] for index in group_v)
+        grids.append({
+            "row_lines": row_lines,
+            "column_lines": column_lines,
+            "complete": all((h_index, v_index) in crossings for h_index in group_h for v_index in group_v),
+            "crossing_count": sum(len(meets_vertical[h_index] & group_v) for h_index in group_h),
+        })
+    # Page order: topmost first, then leftmost, so a document's tables are
+    # recorded in the order a reader meets them.
+    return sorted(grids, key=lambda grid: (-grid["row_lines"][-1], grid["column_lines"][0]))
+
+
+def table_cell_text(characters: list[tuple[str, dict[str, Any] | None]], grid: dict[str, Any]) -> list[list[str]]:
+    """Place each measured character in the cell its own centre falls inside.
+
+    The centre decides, not the edges: a glyph may overhang the rule beside it,
+    and a cell a character merely touches is not the cell it is in. Characters
+    keep the order PDFium read them in, so a cell reads as the source wrote it,
+    and a gap in that order becomes a space -- a character PDFium gives no
+    rectangle for is one it drew nothing for, which is what a space is.
+
+    A cell no character falls inside stays empty. Borrowing from a neighbour to
+    fill it would be inventing a value that the page does not contain.
+    """
+    row_count = len(grid["row_lines"]) - 1
+    column_count = len(grid["column_lines"]) - 1
+    if row_count < 1 or column_count < 1:
+        return []
+
+    def band(lines: list[float], value: float) -> int | None:
+        for index in range(len(lines) - 1):
+            if lines[index] <= value <= lines[index + 1]:
+                return index
+        return None
+
+    collected: list[list[list[tuple[int, str]]]] = [
+        [[] for _ in range(column_count)] for _ in range(row_count)
+    ]
+    for index, (character, box) in enumerate(characters):
+        if not box:
+            continue
+        column = band(grid["column_lines"], (float(box["x0"]) + float(box["x1"])) / 2)
+        if column is None:
+            continue
+        row = band(grid["row_lines"], (float(box["y0"]) + float(box["y1"])) / 2)
+        if row is None:
+            continue
+        # Rows are read from the top of the page down, while the lines that
+        # bound them ascend from its foot, so the topmost band is the last one.
+        collected[row_count - 1 - row][column].append((index, character))
+
+    rows: list[list[str]] = []
+    for row in collected:
+        cells: list[str] = []
+        for cell in row:
+            pieces: list[str] = []
+            previous: int | None = None
+            for index, character in sorted(cell):
+                if previous is not None and index != previous + 1:
+                    pieces.append(" ")
+                pieces.append(character)
+                previous = index
+            cells.append(" ".join("".join(pieces).split()))
+        rows.append(cells)
+    return rows
+
+
+def page_character_boxes(textpage: Any) -> list[Any] | None:
+    """Every character's rectangle, in the page's own unrotated frame.
+
+    One scan, shared by the two measurements that need it: which characters a
+    declared link rectangle is drawn over, and which table cell a character
+    sits in. `None` means PDFium could not report the rectangles at all, which
+    is a different answer from a page that has no characters to report.
+    """
+    try:
+        return [textpage.get_charbox(index) for index in range(textpage.count_chars())]
+    except Exception:
+        return None
+
+
+def displayed_character_boxes(textpage: Any, extracted_text: str, rotation: int,
+                              source_width: float, source_height: float) -> list[tuple[str, dict[str, Any] | None]]:
+    """Each character of a page paired with its rectangle in the displayed frame."""
+    boxes = page_character_boxes(textpage)
+    if not boxes:
+        return []
+    paired: list[tuple[str, dict[str, Any] | None]] = []
+    for index, box in enumerate(boxes):
+        character = extracted_text[index] if index < len(extracted_text) else " "
+        measured = make_bbox(box[0], box[1], box[2], box[3], "pdf-page-points") if box else None
+        paired.append((character, bbox_to_displayed_frame(measured, rotation, source_width, source_height)))
+    return paired
+
+
+def page_rules(page: Any, rotation: int, source_width: float, source_height: float) -> dict[str, list[dict[str, Any]]]:
+    """The rules a page draws, measured in the frame the page is displayed in.
+
+    PDFium reports path bounds in the page's own unrotated coordinates while a
+    reader sees the page turned. On a quarter-turned page the rules that
+    separate rows on screen are drawn across the source frame, so each
+    rectangle is moved into the displayed frame *before* it is called
+    horizontal or vertical. Classifying first would transpose every landscape
+    table's rows and columns, which is the same frame confusion 36e787c fixed
+    for text.
+    """
+    horizontal: list[dict[str, Any]] = []
+    vertical: list[dict[str, Any]] = []
+    try:
+        import pypdfium2.raw as raw  # type: ignore
+
+        drawn_paths = page.get_objects(filter=[raw.FPDF_PAGEOBJ_PATH], max_depth=4)
+    except Exception:
+        return {"horizontal": horizontal, "vertical": vertical}
+    try:
+        for scanned, drawn in enumerate(drawn_paths):
+            if scanned >= MAX_SCANNED_PATH_OBJECTS:
+                break
+            if len(horizontal) >= MAX_RULES_PER_AXIS and len(vertical) >= MAX_RULES_PER_AXIS:
+                break
+            try:
+                left, bottom, right, top = drawn.get_bounds()
+            except Exception:
+                continue
+            rule = rule_from_bbox(bbox_to_displayed_frame(
+                make_bbox(left, bottom, right, top, "pdf-page-points"),
+                rotation, source_width, source_height,
+            ))
+            if not rule:
+                continue
+            axis = horizontal if rule["axis"] == "horizontal" else vertical
+            if len(axis) < MAX_RULES_PER_AXIS:
+                axis.append(rule)
+    except Exception:  # pragma: no cover - source documents vary widely
+        return {"horizontal": horizontal, "vertical": vertical}
+    return {"horizontal": horizontal, "vertical": vertical}
+
+
+def page_ruled_tables(page: Any, textpage: Any, extracted_text: str, rotation: int,
+                      source_width: float, source_height: float) -> list[dict[str, Any]]:
+    """Recover the ruled tables a page draws, with the text inside their cells.
+
+    Everything here is measured: the rules are drawn by the page, the cells are
+    the rectangles those rules enclose, and a cell's text is the characters
+    whose centres land in it. Nothing is inferred from alignment or spacing, so
+    a table the page did not rule is not a table Philon reports.
+    """
+    rules = page_rules(page, rotation, source_width, source_height)
+    grids = ruled_table_grids(
+        merge_rules(rules["horizontal"], RULE_POSITION_TOLERANCE_POINTS),
+        merge_rules(rules["vertical"], RULE_POSITION_TOLERANCE_POINTS),
+    )
+    if not grids:
+        return []
+    characters = displayed_character_boxes(textpage, extracted_text, rotation, source_width, source_height)
+    recovered: list[dict[str, Any]] = []
+    for grid in grids:
+        # The grid's lines are already displayed-frame positions, so its
+        # rectangle is too, and must not be converted a second time.
+        bbox = make_bbox(grid["column_lines"][0], grid["row_lines"][0],
+                         grid["column_lines"][-1], grid["row_lines"][-1], "pdf-page-points")
+        if not bbox:
+            continue
+        recovered.append({
+            "bbox": bbox,
+            "row_count": len(grid["row_lines"]) - 1,
+            "column_count": len(grid["column_lines"]) - 1,
+            "complete": grid["complete"],
+            "crossing_count": grid["crossing_count"],
+            "rows": table_cell_text(characters, grid) if grid["complete"] else [],
+        })
+    return recovered
+
+
 #: Schemes Philon will turn into a link. A PDF may declare any URI in an
 #: annotation, `javascript:` included, and the presentation export is a document
 #: someone opens locally. Anything outside this set stays recorded as page
@@ -914,10 +1309,8 @@ def measure_link_anchors(textpage: Any, extracted_text: str, leading_trim: int, 
     """
     if not annotations:
         return []
-    try:
-        character_count = textpage.count_chars()
-        boxes = [textpage.get_charbox(index) for index in range(character_count)]
-    except Exception:
+    boxes = page_character_boxes(textpage)
+    if boxes is None:
         return []
     anchors: list[dict[str, Any]] = []
     for annotation in annotations:
@@ -1271,6 +1664,9 @@ def pdfium_extract(path: Path, selection: tuple[int, ...] | None = None) -> tupl
             pages.append({
                 "number": index + 1, "width": width, "height": height, "text": text,
                 "rotation": rotation,
+                "ruled_tables": page_ruled_tables(
+                    page, textpage, extracted_text, rotation, source_width, source_height,
+                ),
                 "links": measure_link_anchors(
                     textpage, extracted_text, leading_trim, text,
                     link_annotations[index] if index < len(link_annotations) else [],
@@ -1663,16 +2059,26 @@ def _is_bolder_sibling(face: str, body_face: str) -> bool:
     return bool(body_face) and face != body_face and face.startswith(body_face) and face[len(body_face):].upper() in {"B", "BD", "-B", "-BD"}
 
 
-def make_block(page: dict[str, Any], ordinal: int, text: str, start: int | None = None, end: int | None = None, ocr_line_indexes: list[int] | None = None) -> dict[str, Any]:
+def make_block(page: dict[str, Any], ordinal: int, text: str, start: int | None = None, end: int | None = None,
+               ocr_line_indexes: list[int] | None = None, recovered_rows: list[list[str]] | None = None,
+               recovered_bbox: dict[str, Any] | None = None) -> dict[str, Any]:
     typeface = block_typeface(page, start, end)
     kind, level = classify_block(text, prominence=block_prominence(page, start, end), typeface=typeface)
+    # Rules the page drew outrank anything the characters suggest. The
+    # classifier reads delimiters, and a ruled table carries none: its columns
+    # are separated by geometry, so without this a proven table is filed as a
+    # paragraph and rendered as one.
+    if recovered_rows:
+        kind, level = "table", None
     health = native_health(text)
     page_id = f"page-{page['number']}"
     block_id = f"{page_id}-block-{ordinal}"
     confidence = page.get("ocr_confidence", health["confidence"])
-    bbox = source_bbox_for_block(page, text, start, end, ocr_line_indexes)
+    # The ruled rectangle is the table's own outer edge, which is a truer
+    # bound than the union of the character boxes inside it.
+    bbox = recovered_bbox or source_bbox_for_block(page, text, start, end, ocr_line_indexes)
     links = block_links(page, start, end)
-    return {
+    block = {
         "id": block_id,
         "page": page_id,
         "type": kind,
@@ -1688,6 +2094,8 @@ def make_block(page: dict[str, Any], ordinal: int, text: str, start: int | None 
                 "native_text_present": health["native_text_present"],
                 "replacement_characters": health["replacement_characters"],
                 "source_bbox_available": bbox is not None,
+                "ruled_table_recovered": bool(recovered_rows),
+                "ruled_table_cell_count": sum(len(row) for row in recovered_rows) if recovered_rows else 0,
                 "source_declared_link_count": len(links),
                 "unanchorable_link_count": sum(1 for link in links if not is_anchorable_link(link["uri"])),
                 "source_bbox_coordinate_space": bbox["coordinate_space"] if bbox else None,
@@ -1697,6 +2105,14 @@ def make_block(page: dict[str, Any], ordinal: int, text: str, start: int | None 
             "repair_history": [],
         },
     }
+    if recovered_rows:
+        block["table"] = {
+            "rows": [list(row) for row in recovered_rows],
+            "row_count": len(recovered_rows),
+            "column_count": len(recovered_rows[0]) if recovered_rows else 0,
+            "source": "ruled-geometry",
+        }
+    return block
 
 
 def validate_ir(ir: dict[str, Any]) -> None:
@@ -1725,6 +2141,18 @@ def validate_ir(ir: dict[str, Any]) -> None:
                 raise ValueError("Block geometry coordinates must be numeric.")
             if bbox["x1"] <= bbox["x0"] or bbox["y1"] <= bbox["y0"]:
                 raise ValueError("Block geometry must have positive area.")
+        table = block.get("table")
+        if table is not None:
+            rows = table.get("rows")
+            if not isinstance(rows, list) or not rows:
+                raise ValueError("A recovered table must carry its rows.")
+            if any(not isinstance(row, list) or any(not isinstance(cell, str) for cell in row) for row in rows):
+                raise ValueError("Recovered table cells must be strings.")
+            # A grid encloses the same number of cells in every row by
+            # construction. A ragged one means the cells were not read from the
+            # rules that bound them, and no consumer should be handed it.
+            if len({len(row) for row in rows}) != 1:
+                raise ValueError("A recovered table must have the same number of cells in every row.")
 
 
 def resolve_citations(blocks: list[dict[str, Any]]) -> None:
@@ -1752,11 +2180,11 @@ def resolve_cross_page_tables(blocks: list[dict[str, Any]]) -> None:
     for block in blocks:
         if block["type"] != "table":
             continue
-        rows = table_rows(block["text"])
+        rows = block_table_rows(block)
         if not rows:
             continue
         if previous:
-            prior_rows = table_rows(previous["text"])
+            prior_rows = block_table_rows(previous)
             different_pages = not previous.get("page") or not block.get("page") or previous.get("page") != block.get("page")
             if different_pages and prior_rows and prior_rows[0] == rows[0] and len(prior_rows[0]) == len(rows[0]):
                 block["evidence"]["cross_page_continuation_of"] = previous["id"]
@@ -1770,7 +2198,7 @@ def table_export_groups(blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
     Markdown and HTML retain their per-page blocks; the joined CSV is an
     additional logical-table output with an explicit list of source blocks.
     """
-    tables = [block for block in blocks if block.get("type") == "table" and table_rows(block.get("text", ""))]
+    tables = [block for block in blocks if block.get("type") == "table" and block_table_rows(block)]
     by_id = {block["id"]: block for block in tables}
     groups: list[dict[str, Any]] = []
     visited: set[str] = set()
@@ -1778,14 +2206,14 @@ def table_export_groups(blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if root["id"] in visited or root.get("evidence", {}).get("cross_page_continuation_of") in by_id:
             continue
         current = root
-        root_rows = table_rows(current["text"])
+        root_rows = block_table_rows(current)
         assert root_rows is not None
         merged_rows = list(root_rows)
         source_blocks = [current["id"]]
         visited.add(current["id"])
         while (next_id := current.get("evidence", {}).get("continues_on_block")) in by_id and next_id not in visited:
             current = by_id[next_id]
-            rows = table_rows(current["text"])
+            rows = block_table_rows(current)
             if not rows or rows[0] != merged_rows[0]:
                 break
             merged_rows.extend(rows[1:])
@@ -1794,7 +2222,7 @@ def table_export_groups(blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
         groups.append({"id": root["id"], "rows": merged_rows, "source_block_ids": source_blocks})
     for orphan in tables:
         if orphan["id"] not in visited:
-            rows = table_rows(orphan["text"])
+            rows = block_table_rows(orphan)
             assert rows is not None
             groups.append({"id": orphan["id"], "rows": rows, "source_block_ids": [orphan["id"]]})
     return groups
@@ -1868,7 +2296,8 @@ def make_ir(path: Path, profile: str, selection: tuple[int, ...] | None = None) 
         page_id = f"page-{source_page['number']}"
         source_parts = geometric_native_parts(source_page, artifacts) if source_page["method"] == "pdfium-native" else ocr_parts_with_geometry(source_page, artifacts)
         page_blocks = [
-            make_block(source_page, ordinal, part["text"], part.get("start"), part.get("end"), part.get("line_indexes"))
+            make_block(source_page, ordinal, part["text"], part.get("start"), part.get("end"), part.get("line_indexes"),
+                       part.get("table_rows"), part.get("table_bbox"))
             for ordinal, part in enumerate(source_parts, start=1)
         ]
         health = native_health(source_page["text"])
@@ -1890,8 +2319,24 @@ def make_ir(path: Path, profile: str, selection: tuple[int, ...] | None = None) 
             "route": route_for_page(source_page, health),
             "native_features": source_page.get("native_features", {"fonts": [], "links": [], "geometry": "normalized-vision-rectangles" if source_page.get("ocr_lines") else "not-applicable"}),
             "source_artifacts": {"numeric_markers": source_page.get("numeric_source_markers", [])},
+            "ruled_tables": [
+                {key: table[key] for key in ("bbox", "row_count", "column_count", "complete", "crossing_count")}
+                for table in source_page.get("ruled_tables", [])
+            ],
             "block_ids": [block["id"] for block in page_blocks],
         })
+        # A lattice with the shape of a table that its rules do not close is
+        # the uncertainty this feature is most likely to meet: a merged cell, a
+        # rule drawn only under the headings. Philon reports it and emits
+        # nothing, because a table with invented cells is worse than none.
+        for table in source_page.get("ruled_tables", []):
+            if not table.get("complete") and table["row_count"] >= 2 and table["column_count"] >= 2:
+                warnings.append(WarningRecord(
+                    "RULED_TABLE_INCOMPLETE",
+                    f"A {table['row_count']}x{table['column_count']} arrangement of rules on this page does not "
+                    "close into a full grid, so its cells are not proven and no table was recovered from it.",
+                    page=source_page["number"],
+                ))
         blocks.extend(page_blocks)
 
     if len(pages) > MAX_PDF_PAGES:
@@ -2114,11 +2559,11 @@ def render_markdown(ir: dict[str, Any]) -> str:
         text = anchor_links_markdown(text, block.get("links", []))
         if block["type"] == "heading":
             lines.extend(["#" * (block["level"] or 2) + " " + text, ""])
-        elif block["type"] == "table" and table_rows(block["text"]):
-            rows = table_rows(block["text"]) or []
-            lines.append("| " + " | ".join(rows[0]) + " |")
+        elif block["type"] == "table" and block_table_rows(block):
+            rows = block_table_rows(block) or []
+            lines.append("| " + " | ".join(markdown_table_cell(cell) for cell in rows[0]) + " |")
             lines.append("| " + " | ".join("---" for _ in rows[0]) + " |")
-            lines.extend("| " + " | ".join(row) + " |" for row in rows[1:])
+            lines.extend("| " + " | ".join(markdown_table_cell(cell) for cell in row) + " |" for row in rows[1:])
             lines.append("")
         elif block["type"] == "formula":
             lines.extend(["```text", text, "```", ""])
@@ -2168,8 +2613,8 @@ def render_html(ir: dict[str, Any], include_facsimiles: bool = False) -> str:
                 continue
             if block["type"] == "heading":
                 body.append(f'<h{block["level"] or 2} {attrs}>{content}</h{block["level"] or 2}>')
-            elif block["type"] == "table" and table_rows(block["text"]):
-                rows = table_rows(block["text"]) or []
+            elif block["type"] == "table" and block_table_rows(block):
+                rows = block_table_rows(block) or []
                 header = "<thead><tr>" + "".join(f"<th scope=\"col\">{html.escape(cell)}</th>" for cell in rows[0]) + "</tr></thead>"
                 body_rows = "".join("<tr>" + "".join(f"<td>{html.escape(cell)}</td>" for cell in row) + "</tr>" for row in rows[1:])
                 body.append("<table " + attrs + ">" + header + "<tbody>" + body_rows + "</tbody></table>")
@@ -2211,7 +2656,8 @@ def machine_block_record(block: dict[str, Any], page_number: int | None) -> dict
         "id": block.get("id"), "page_id": block.get("page"), "page_number": page_number,
         "type": block.get("type"), "level": block.get("level"),
         "text": block.get("text", ""), "reading_text": clean_reading_text(str(block.get("text", ""))),
-        "bbox": block.get("bbox"), "source": block.get("source"), "evidence": block.get("evidence"), "review": block.get("review"),
+        "bbox": block.get("bbox"), "table": block.get("table"),
+        "source": block.get("source"), "evidence": block.get("evidence"), "review": block.get("review"),
     }
 
 
@@ -2291,8 +2737,8 @@ def page_tree_html(block: dict[str, Any]) -> str:
     if block_type == "heading":
         level = int(block.get("level") or 2)
         return f"<h{level}>{content}</h{level}>"
-    if block_type == "table" and table_rows(str(block.get("text", ""))):
-        rows = table_rows(str(block["text"])) or []
+    if block_type == "table" and block_table_rows(block):
+        rows = block_table_rows(block) or []
         head = "".join(f"<th>{html.escape(cell)}</th>" for cell in rows[0])
         body = "".join("<tr>" + "".join(f"<td>{html.escape(cell)}</td>" for cell in row) + "</tr>" for row in rows[1:])
         return f"<table><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table>"
@@ -2431,7 +2877,7 @@ def accessibility_report(ir: dict[str, Any]) -> dict[str, Any]:
         findings.append({"rule": "heading-order", "status": "review", "message": "Heading levels jump by more than one level in the source-derived structure."})
     else:
         findings.append({"rule": "heading-order", "status": "pass", "message": "Emitted heading levels do not skip levels."})
-    tables = sum(block["type"] == "table" and table_rows(block["text"]) is not None for block in ir["blocks"])
+    tables = sum(block["type"] == "table" and block_table_rows(block) is not None for block in ir["blocks"])
     findings.append({"rule": "native-tables", "status": "pass" if tables else "not-applicable", "message": "Native tables include header cells in semantic HTML." if tables else "No deterministically structured native tables were emitted."})
     figures = sum(block["type"] == "figure" for block in ir["blocks"]) + len(ir.get("document_artifacts", {}).get("native_images", []))
     if figures:
