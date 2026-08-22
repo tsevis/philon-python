@@ -47,6 +47,24 @@ def changed_token_count(before: str, after: str) -> int:
     return max(len(before_tokens), len(after_tokens)) - shared
 
 
+def link_summary(links: list[dict[str, Any]]) -> str:
+    """Say what the PDF's own link annotations came to on this block.
+
+    A target the exports will not make clickable is still reported. It is
+    something the source declared, and saying nothing about it would hide a
+    decision Philon made rather than record it.
+    """
+    if not links:
+        return "None declared"
+    anchorable = [link for link in links if str(link.get("uri", "")).strip().lower().startswith(("http://", "https://", "mailto:"))]
+    withheld = len(links) - len(anchorable)
+    if not withheld:
+        return f"{len(anchorable)} anchored"
+    if not anchorable:
+        return f"{withheld} declared, none an anchorable scheme"
+    return f"{len(anchorable)} anchored, {withheld} withheld as unanchorable"
+
+
 def candidates_of(block: dict[str, Any] | None) -> list[dict[str, Any]]:
     raw = (block or {}).get("evidence", {}).get("alternatives")
     if not isinstance(raw, list):
@@ -224,6 +242,8 @@ class EvidencePanel(QFrame):
             ("Confidence", f"{round(confidence * 100)}% {confidence_label(confidence).lower()}" if block else "Not measured"),
             ("Route", str(((page.get("route") or {}).get("decision") or "")).replace("-", " ") or "Not recorded"),
             ("Source region", f"Measured · {str((block or {}).get('bbox', {}).get('coordinate_space', '')).replace('-', ' ')}" if (block or {}).get("bbox") else "No measured region"),
+            ("Page rotation", f"{int(page.get('rotation') or 0)}°, measured as displayed" if page.get("rotation") else "Upright"),
+            ("Source links", link_summary((block or {}).get("links") or [])),
             ("Native assets", f"{len(assets.get('items', []))} extracted with provenance" if assets else "None extracted"),
             ("Source markers", str(len(markers)) if markers else "None"),
             ("Overlay diagnostics", f"{len(overlays)} pages mapped" if overlays else "No measured overlays"),

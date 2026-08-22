@@ -249,10 +249,18 @@ class PhilonService:
     def preflight(self, paths: Iterable[str], progress: Callable[[dict[str, Any]], None] | None = None) -> dict[str, Any]:
         return engine.action_preflight({"config": {"input_paths": list(paths)}}, progress)
 
-    def convert(self, paths: Iterable[str], profile: str, cache_policy: str, outputs: Iterable[str], progress: Callable[[dict[str, Any]], None] | None = None) -> dict[str, Any]:
+    def parse_pages(self, text: str) -> tuple[int, ...] | None:
+        """Read a page selection the way the engine will, so the interface can
+        refuse a malformed one before a job is started rather than after."""
+        return engine.parse_page_selection(text)
+
+    def convert(self, paths: Iterable[str], profile: str, cache_policy: str, outputs: Iterable[str], progress: Callable[[dict[str, Any]], None] | None = None, pages: tuple[int, ...] | None = None) -> dict[str, Any]:
         if profile not in PROFILES:
             raise ValueError("Profile must be Fast, Balanced, or Verified.")
-        payload = engine.action_convert({"config": {"input_paths": list(paths), "profile": profile, "workspace_dir": str(self.workspace_dir), "cache_policy": cache_policy, "outputs": list(outputs)}}, progress)
+        config = {"input_paths": list(paths), "profile": profile, "workspace_dir": str(self.workspace_dir), "cache_policy": cache_policy, "outputs": list(outputs)}
+        if pages:
+            config["pages"] = list(pages)
+        payload = engine.action_convert({"config": config}, progress)
         self.store.store_job(payload)
         return payload
 

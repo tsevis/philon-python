@@ -362,6 +362,9 @@ def build_qss() -> str:
     QPushButton#PrimaryButton:disabled {{ background: {t['accent']}; }}
     QPushButton#SecondaryButton {{ background: {t['accent_soft_09']}; color: {t['accent_text']}; border: 0; border-radius: 7px; padding: 8px 11px; }}
     QPushButton#SecondaryButton:hover:enabled {{ background: {t['accent_soft_16']}; }}
+    QLineEdit#PagesField {{ background: {t['field_bg']}; color: {t['text']}; border: 1px solid {t['field_border']}; border-radius: 7px; padding: 7px 9px; }}
+    QLineEdit#PagesField:focus {{ border-color: {t['accent']}; }}
+    QLineEdit#PagesField[placeholderText] {{ placeholder-text-color: {t['text_tertiary']}; }}
     QPushButton#TextButton {{ background: transparent; color: {t['accent_text']}; border: 0; padding: 0 9px; }}
     QPushButton#TextButton:hover {{ color: {t['accent_text_hover']}; }}
     QPushButton#DangerButton {{ background: {t['danger_bg']}; color: {t['danger_text']}; border: 0; border-radius: 7px; padding: 8px 11px; }}

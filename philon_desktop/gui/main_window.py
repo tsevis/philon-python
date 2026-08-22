@@ -29,6 +29,7 @@ from .qt import (
     QFileDialog,
     QFrame,
     QKeySequence,
+    QLineEdit,
     QMainWindow,
     QPixmap,
     QPushButton,
@@ -191,6 +192,16 @@ class MainWindow(QMainWindow):
         self.selected_name.setMaximumWidth(420)
         layout.addWidget(self.selected_name, 1)
         layout.addStretch(1)
+        self.pages_field = QLineEdit()
+        self.pages_field.setObjectName("PagesField")
+        self.pages_field.setPlaceholderText("All pages")
+        self.pages_field.setToolTip(
+            "Pages to convert, counted from one: 1-5,8. Leave empty for the whole document.")
+        self.pages_field.setMaxLength(64)
+        self.pages_field.setFixedWidth(112)
+        theme.font(self.pages_field, 12, 600)
+        self.pages_field.returnPressed.connect(self.convert)
+        layout.addWidget(self.pages_field)
         self.profile_picker = Segmented(
             [(name, None) for name in PROFILES], padding=2, font_size=12, font_weight=600, button_padding="7px 10px",
             tooltips=PROFILE_DESCRIPTIONS)
@@ -315,6 +326,9 @@ class MainWindow(QMainWindow):
         self.selected_name.setVisible(single and bool(self.single_path))
         self.selected_name.setText(Path(self.single_path).name if self.single_path else "")
         self.export_button.setVisible(single and self.active_document() is not None)
+        # A batch is a queue of documents; one page range across all of them is
+        # not a thing the engine is asked for, so the field is Single Job only.
+        self.pages_field.setVisible(single)
         blocked = any(item.get("status") == "blocked" for item in self.batch_preflight.values())
         pending = self.batch_view.pending_paths()
         can_convert = (bool(self.single_path) if single else bool(pending) and not blocked) and not self.running
@@ -391,8 +405,17 @@ class MainWindow(QMainWindow):
             if not paths:
                 self.running = False
                 return
+            try:
+                pages = self.service.parse_pages(self.pages_field.text())
+            except ValueError as refusal:
+                # Said here rather than after a job has been started, since the
+                # engine would refuse the same text for the same reason.
+                self.running = False
+                self.error_banner.show_message(str(refusal))
+                self._refresh_command_bar()
+                return
             self._spawn("convert", "conversion", "Preparing the local converter",
-                        lambda progress: self.service.convert(paths, self.profile, preferences.get("cache_policy", "use"), preferences.get("outputs", list(OUTPUTS)), progress),
+                        lambda progress: self.service.convert(paths, self.profile, preferences.get("cache_policy", "use"), preferences.get("outputs", list(OUTPUTS)), progress, pages),
                         self._conversion_finished, total=1)
         else:
             if not self.batch_id:

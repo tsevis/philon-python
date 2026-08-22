@@ -34,6 +34,7 @@ the two copies is the check that says whether that happened.
 | Native PDF/OCR adaptive routing | Implemented; Apple Vision runtime gated | Canonical PDFium extraction, native-text health, per-page routes and adaptive DPI retained. Packaged macOS build compiles the Apple Vision helper; runtime is explicitly unavailable without it. |
 | Evidence and source provenance | Implemented and verified | Block IDs, coordinates, confidence, route, warnings, alternatives, repair history, source crops, overlay exports and manifests retained. |
 | Philon IR version | 0.3.0 in both | The one number the two projects may not drift on: it names the evidence shape a consumer reads, and `validate_ir` refuses any other. 0.3.0 added the page's own `/Rotate`, the source-declared links measured onto each block, and the page selection a conversion covers. A cache entry is named after the IR version it holds, so an entry written against 0.2.0 is never reached rather than read and rejected. |
+| IR 0.3.0 evidence in the interface | Implemented | The page-selection control asks for a range the engine already converts, refusing a malformed one before a job starts; the evidence summary reports the page's own rotation and the source-declared links measured onto the selected block, including a target withheld as unanchorable. |
 | Output formats | Implemented and verified | Markdown, semantic HTML, IR, Marker-style clean-room JSON, chunks, optional embeddings, image assets, CSV, evidence and manifest. |
 | Source/output/review UI | Implemented and smoke-tested | Fit/actual-size, zoomable source preview, page navigation, PDF/normalized-image overlays, block selection, in-app edit, candidate restore, repair request and crop access. |
 | Persistent batch behavior | Implemented and verified | SQLite queue survives process restart, recovers interrupted running item, supports pause-after-current, cancel pending, retry, resume and export completed bundles. |
@@ -47,7 +48,7 @@ the two copies is the check that says whether that happened.
 |---|---|
 | Canonical engine + fuzz + benchmark suite | 141 passed, 2 Apple Vision integration tests skipped because the helper was not enabled in this validation session. |
 | Desktop persistence unit tests | 5 passed (queue recovery, history clean-up, preference validation incl. enabled model ids). |
-| Desktop GUI shell tests | 22 passed off-screen: theme tokens, icon set, shell structure, splash gating, preference round-trips, the ported composition helpers, and the interface face resolving to a family that is installed. |
+| Desktop GUI shell tests | 30 passed off-screen: theme tokens, icon set, shell structure, splash gating, preference round-trips, the ported composition helpers, the interface face resolving to a family that is installed, the page-selection control, and the rotation and source-link evidence rows. |
 | Policy/SBOM checks | Local-only, licence, and SBOM policies passed. |
 | Desktop startup | Qt application constructed off-screen; six native workspace/secondary pages available. |
 | Single-document end-to-end | Generated local PDF passed preflight; Verified conversion produced 2 evidence-linked blocks, a preview raster and a copied 10-file export bundle. The unavailable local BGE runtime emitted `EMBEDDING_FAILED` instead of aborting conversion. |

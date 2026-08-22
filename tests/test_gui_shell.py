@@ -21,7 +21,7 @@ theme.reset_tokens()
 
 from philon_desktop.core import PhilonService  # noqa: E402
 from philon_desktop.gui import about  # noqa: E402
-from philon_desktop.gui.evidence_panel import changed_token_count, confidence_label  # noqa: E402
+from philon_desktop.gui.evidence_panel import EvidencePanel, changed_token_count, confidence_label  # noqa: E402
 from philon_desktop.gui.main_window import MainWindow  # noqa: E402
 from philon_desktop.gui.output_panel import markdown_body, table_rows  # noqa: E402
 from philon_desktop.gui.splash import SPLASH_SEEN_KEY, Splash  # noqa: E402
@@ -33,12 +33,14 @@ def sample_document() -> dict:
         "id": "doc-1",
         "source_path": "/tmp/sample.pdf",
         "cache_hit": False,
-        "pages": [{"id": "page-1", "number": 1, "width": 612, "height": 792, "route": {"decision": "native-text"}}],
+        "pages": [{"id": "page-1", "number": 1, "width": 612, "height": 792, "rotation": 90, "route": {"decision": "native-text"}}],
         "blocks": [
             {
                 "id": "block-1", "page": "page-1", "type": "heading", "level": 1, "text": "A Study of Readings",
                 "source": {"method": "native-text", "confidence": 0.97},
                 "bbox": {"x0": 40, "y0": 700, "x1": 570, "y1": 760, "coordinate_space": "pdf-page-points"},
+                "links": [{"uri": "https://example.test/paper", "text": "A Study", "bbox": None},
+                          {"uri": "javascript:alert(1)", "text": "of Readings", "bbox": None}],
                 "evidence": {"alternatives": [{"kind": "vision-alternative", "text": "A Study of Reading", "selected": False}]},
             },
             {
@@ -175,6 +177,101 @@ class PortedLogicTest(unittest.TestCase):
         self.assertIn("Phosphor", about.LEGAL)
         self.assertIn("PySide6", about.LEGAL)
         self.assertTrue(about.VERSION)
+
+
+class PageSelectionControlTest(unittest.TestCase):
+    """The engine converts a page range; the interface has to be able to ask."""
+
+    def setUp(self) -> None:
+        self.service = PhilonService()
+        self.window = MainWindow(self.service)
+
+    def tearDown(self) -> None:
+        wait_for_workers()
+        self.window.close()
+        self.window.deleteLater()
+
+    def test_the_field_is_offered_for_a_single_job_only(self):
+        self.window.job_tabs.select("Single Job")
+        self.window._refresh_command_bar()
+        self.assertTrue(self.window.pages_field.isVisibleTo(self.window))
+        # A batch is a queue of documents, not one document to take a range of.
+        self.window.job_tabs.select("Batch")
+        self.window._refresh_command_bar()
+        self.assertFalse(self.window.pages_field.isVisibleTo(self.window))
+
+    def test_an_empty_field_means_the_whole_document(self):
+        self.assertIsNone(self.service.parse_pages(""))
+        self.assertIsNone(self.service.parse_pages("   "))
+
+    def test_a_range_is_read_the_way_the_engine_reads_it(self):
+        self.assertEqual(self.service.parse_pages("1-3,8"), (1, 2, 3, 8))
+
+    def test_a_malformed_range_is_refused_before_a_job_starts(self):
+        self.window.job_tabs.select("Single Job")
+        self.window.single_path = "/tmp/not-really-opened.pdf"
+        self.window.pages_field.setText("3-1")
+        started = []
+        self.window._spawn = lambda *args, **kwargs: started.append(args)
+
+        self.window.convert()
+
+        self.assertEqual(started, [], "a job was started on a selection the engine would refuse")
+        self.assertTrue(self.window.error_banner.isVisibleTo(self.window))
+        self.assertIn("3-1", self.window.error_banner.message.text())
+        self.assertFalse(self.window.running)
+
+    def test_a_sound_range_reaches_the_service(self):
+        self.window.job_tabs.select("Single Job")
+        self.window.single_path = "/tmp/not-really-opened.pdf"
+        self.window.pages_field.setText("2-4")
+        seen = {}
+
+        def spawn(_key, _kind, _message, work, _done, total=1):
+            seen["work"] = work
+
+        self.window._spawn = spawn
+        self.window.convert()
+
+        captured = {}
+        self.service.convert = lambda *args, **kwargs: captured.update(args=args, kwargs=kwargs)
+        seen["work"](lambda _progress: None)
+        self.assertEqual(captured["args"][-1], (2, 3, 4))
+
+
+class EvidenceForNewFieldsTest(unittest.TestCase):
+    """Evidence the engine records is evidence the panel has to show."""
+
+    def setUp(self) -> None:
+        self.panel = EvidencePanel()
+
+    def tearDown(self) -> None:
+        self.panel.deleteLater()
+
+    @staticmethod
+    def summary_text(panel) -> str:
+        from philon_desktop.gui.qt import QLabel
+
+        return " | ".join(label.text() for label in panel.findChildren(QLabel))
+
+    def test_a_rotated_page_says_so(self):
+        self.panel.set_document(sample_document(), "block-1")
+        self.assertIn("90°", self.summary_text(self.panel))
+
+    def test_links_are_counted_and_the_withheld_one_is_named(self):
+        self.panel.set_document(sample_document(), "block-1")
+        text = self.summary_text(self.panel)
+        self.assertIn("1 anchored", text)
+        self.assertIn("withheld", text)
+
+    def test_the_summary_reads_for_each_shape_of_link_evidence(self):
+        from philon_desktop.gui.evidence_panel import link_summary
+
+        self.assertEqual(link_summary([]), "None declared")
+        self.assertEqual(link_summary([{"uri": "https://a.test"}]), "1 anchored")
+        self.assertEqual(link_summary([{"uri": "javascript:x"}]), "1 declared, none an anchorable scheme")
+        self.assertEqual(link_summary([{"uri": "https://a.test"}, {"uri": "file:///x"}]),
+                         "1 anchored, 1 withheld as unanchorable")
 
 
 if __name__ == "__main__":
