@@ -248,6 +248,77 @@ def preflight_input(path: Path) -> dict[str, Any]:
     }
 
 
+def parse_page_selection(value: Any) -> tuple[int, ...] | None:
+    """Read a 1-based page selection, or None meaning the document entire.
+
+    Accepts "1-5,8" or a list of numbers. Pages are counted from one because
+    that is how they are printed on the page, recorded in the evidence and
+    named in the exports; an absent or empty selection is not a selection.
+    """
+    if value is None or value == "" or value == []:
+        return None
+    numbers: set[int] = set()
+    items = value if isinstance(value, (list, tuple)) else str(value).split(",")
+    for item in items:
+        text = str(item).strip()
+        if not text:
+            continue
+        match = re.fullmatch(r"(\d{1,6})(?:\s*-\s*(\d{1,6}))?", text)
+        if not match:
+            raise ValueError(f"Page selection '{text}' is not a page or a page range.")
+        first = int(match.group(1))
+        last = int(match.group(2)) if match.group(2) else first
+        if first < 1 or last < first:
+            raise ValueError(f"Page selection '{text}' is not a page or a page range.")
+        numbers.update(range(first, last + 1))
+    return tuple(sorted(numbers)) or None
+
+
+def compact_page_selection(selection: Iterable[int]) -> str:
+    """A selection written back in its shortest form: (1, 2, 3, 8) -> '1-3,8'."""
+    parts: list[str] = []
+    run_start: int | None = None
+    previous: int | None = None
+    for number in selection:
+        if run_start is None:
+            run_start = previous = number
+        elif previous is not None and number == previous + 1:
+            previous = number
+        else:
+            parts.append(str(run_start) if run_start == previous else f"{run_start}-{previous}")
+            run_start = previous = number
+    if run_start is not None:
+        parts.append(str(run_start) if run_start == previous else f"{run_start}-{previous}")
+    return ",".join(parts)
+
+
+def page_selection_token(selection: tuple[int, ...] | None) -> str:
+    """A short, stable name for a selection, for cache keys and export paths.
+
+    A conversion of part of a document must never be served for, or written
+    over, a conversion of the whole of it, so the selection is part of both
+    names. The compact form is kept where it stays short enough to read.
+    """
+    if not selection:
+        return ""
+    compact = compact_page_selection(selection)
+    if len(compact) <= 24:
+        return "pages-" + compact.replace(",", "_")
+    return "pages-" + hashlib.sha256(compact.encode("utf-8")).hexdigest()[:12]
+
+
+def validate_page_selection(selection: tuple[int, ...] | None, page_count: int | None) -> None:
+    """Refuse a page this document does not have, before anything is extracted."""
+    if not selection or not page_count:
+        return
+    beyond = tuple(number for number in selection if number > page_count)
+    if beyond:
+        raise ValueError(
+            f"This document has {page_count} pages; the selection asks for "
+            f"{compact_page_selection(beyond)}."
+        )
+
+
 def safe_slug(value: str) -> str:
     clean = re.sub(r"[^a-zA-Z0-9._-]+", "-", value).strip("-._")
     return clean or "document"
@@ -1148,7 +1219,7 @@ def document_body_typeface(source_pages: list[dict[str, Any]]) -> tuple[str, flo
     return face, statistics.median(sizes) if sizes else 0.0
 
 
-def pdfium_extract(path: Path) -> tuple[list[dict[str, Any]], list[WarningRecord]]:
+def pdfium_extract(path: Path, selection: tuple[int, ...] | None = None) -> tuple[list[dict[str, Any]], list[WarningRecord]]:
     """Use PDFium first, preserving a pypdf fallback for non-packaged tests."""
     warnings: list[WarningRecord] = []
     try:
@@ -1156,8 +1227,11 @@ def pdfium_extract(path: Path) -> tuple[list[dict[str, Any]], list[WarningRecord
 
         document = pdfium.PdfDocument(str(path))
         link_annotations = pdf_link_annotations(path, len(document))
+        wanted = set(selection or ())
         pages: list[dict[str, Any]] = []
         for index in range(len(document)):
+            if wanted and (index + 1) not in wanted:
+                continue
             page = document[index]
             width, height = page.get_size()
             # PDFium's page size already has /Rotate applied; its text
@@ -1212,8 +1286,11 @@ def pdfium_extract(path: Path) -> tuple[list[dict[str, Any]], list[WarningRecord
         from pypdf import PdfReader  # type: ignore
 
         reader = PdfReader(str(path))
+        wanted = set(selection or ())
         pages = []
         for index, page in enumerate(reader.pages):
+            if wanted and (index + 1) not in wanted:
+                continue
             box = page.mediabox
             pages.append({
                 "number": index + 1,
@@ -1227,14 +1304,21 @@ def pdfium_extract(path: Path) -> tuple[list[dict[str, Any]], list[WarningRecord
         raise RuntimeError("Install pypdfium2 or pypdf before converting PDF files.")
 
 
-def native_pdf_features(path: Path, page_count: int) -> list[dict[str, Any]]:
-    """Collect source-declared links and fonts without inferring geometry."""
-    features = [{"fonts": [], "links": [], "geometry": "pdfium-text-rectangles"} for _ in range(page_count)]
+def native_pdf_features(path: Path, page_numbers: list[int]) -> list[dict[str, Any]]:
+    """Collect source-declared links and fonts without inferring geometry.
+
+    Keyed by the page's own number rather than its position in the result, so
+    a conversion of part of a document still reads each page's own fonts.
+    """
+    features = [{"fonts": [], "links": [], "geometry": "pdfium-text-rectangles"} for _ in page_numbers]
     try:
         from pypdf import PdfReader  # type: ignore
 
         reader = PdfReader(str(path), strict=False)
-        for index, page in enumerate(reader.pages[:page_count]):
+        for index, number in enumerate(page_numbers):
+            if not 1 <= number <= len(reader.pages):
+                continue
+            page = reader.pages[number - 1]
             resources = page.get("/Resources") or {}
             if hasattr(resources, "get_object"):
                 resources = resources.get_object()
@@ -1752,17 +1836,22 @@ def verified_checks(pages: list[dict[str, Any]], blocks: list[dict[str, Any]]) -
     return findings
 
 
-def make_ir(path: Path, profile: str) -> tuple[dict[str, Any], list[WarningRecord], list[Timing]]:
+def make_ir(path: Path, profile: str, selection: tuple[int, ...] | None = None) -> tuple[dict[str, Any], list[WarningRecord], list[Timing]]:
     started = time.perf_counter()
     suffix = path.suffix.lower()
     preflight = preflight_input(path)
+    validate_page_selection(selection, preflight.get("declared_page_count"))
     if suffix == ".pdf":
-        source_pages, warnings = pdfium_extract(path)
+        source_pages, warnings = pdfium_extract(path, selection)
         warnings.extend(ocr_textless_pdf_pages(path, source_pages, profile))
-        for source_page, features in zip(source_pages, native_pdf_features(path, len(source_pages))):
+        page_numbers = [source_page["number"] for source_page in source_pages]
+        for source_page, features in zip(source_pages, native_pdf_features(path, page_numbers)):
             source_page["native_features"] = features
     else:
         source_pages, warnings = image_extract(path, profile)
+        validate_page_selection(selection, 1)
+    if selection and not source_pages:
+        raise ValueError("The page selection matched no page of this document.")
 
     body_face, body_size = document_body_typeface(source_pages)
     for source_page in source_pages:
@@ -1810,6 +1899,7 @@ def make_ir(path: Path, profile: str) -> tuple[dict[str, Any], list[WarningRecor
         "document": {
             "id": f"sha256:{doc_hash}",
             "source": {"path": str(path), "filename": path.name, "bytes_sha256": doc_hash, "page_count": len(pages), "preflight": preflight},
+            "page_selection": compact_page_selection(selection) if selection else None,
             "pipeline": {"profile": profile, "local_only": True, "engine": ENGINE_VERSION, "validation_mode": "deterministic-verified" if profile == "Verified" else "standard"},
             "created_at": now(),
         },
@@ -2387,7 +2477,7 @@ def verified_artifact_manifest(manifest_path: Path, source: Path, expected_sourc
     return manifest
 
 
-def render_source_previews(path: Path, output_dir: Path, page_count: int, reuse: bool = False) -> tuple[list[str], list[WarningRecord]]:
+def render_source_previews(path: Path, output_dir: Path, page_numbers: list[int], reuse: bool = False) -> tuple[list[str], list[WarningRecord]]:
     """Export bounded local page rasters for source review, never as OCR input.
 
     These preview assets let the desktop client draw an evidence rectangle over
@@ -2398,7 +2488,7 @@ def render_source_previews(path: Path, output_dir: Path, page_count: int, reuse:
     preview_dir.mkdir(parents=True, exist_ok=True)
     manifest_path = preview_dir / "manifest.json"
     if reuse:
-        recorded = verified_artifact_manifest(manifest_path, path, page_count)
+        recorded = verified_artifact_manifest(manifest_path, path, len(page_numbers))
         if recorded is not None:
             return [str(item["path"]) for item in recorded["items"]], []
     previews: list[str] = []
@@ -2408,9 +2498,13 @@ def render_source_previews(path: Path, output_dir: Path, page_count: int, reuse:
             import pypdfium2 as pdfium  # type: ignore
 
             document = pdfium.PdfDocument(str(path))
-            for index in range(min(len(document), page_count)):
-                target = preview_dir / f"page-{index + 1:04}.png"
-                page = document[index]
+            for number in page_numbers:
+                if not 1 <= number <= len(document):
+                    continue
+                # Named by the page's own number, so a preview of page 40 is
+                # page-0040.png whether or not pages 1 to 39 were converted.
+                target = preview_dir / f"page-{number:04}.png"
+                page = document[number - 1]
                 try:
                     temporary = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
                     try:
@@ -2442,7 +2536,7 @@ def render_source_previews(path: Path, output_dir: Path, page_count: int, reuse:
     # Written only once every page rendered, and written atomically, so an
     # interrupted run leaves no manifest and cannot be reused.
     atomic_write_text(manifest_path, json.dumps({
-        "schema_version": ARTIFACT_MANIFEST_VERSION, "source": str(path), "source_pages": page_count,
+        "schema_version": ARTIFACT_MANIFEST_VERSION, "source": str(path), "source_pages": len(page_numbers),
         "items": [{"path": item, "bytes_sha256": sha256_file(Path(item))} for item in previews],
     }, indent=2, ensure_ascii=False))
     return previews, warnings
@@ -2498,7 +2592,7 @@ def describe_native_pdf_image(image: Any) -> tuple[bytes, str, dict[str, Any]]:
     return data, suffix, metadata
 
 
-def extract_native_pdf_assets(path: Path, output_dir: Path, reuse: bool = False) -> tuple[dict[str, Any] | None, list[WarningRecord]]:
+def extract_native_pdf_assets(path: Path, output_dir: Path, reuse: bool = False, page_numbers: list[int] | None = None) -> tuple[dict[str, Any] | None, list[WarningRecord]]:
     """Extract native PDF image streams with byte/hash/page provenance.
 
     This is intentionally extraction, not image understanding: captions and
@@ -2528,7 +2622,10 @@ def extract_native_pdf_assets(path: Path, output_dir: Path, reuse: bool = False)
         from pypdf import PdfReader  # type: ignore
 
         reader = PdfReader(str(path), strict=False)
+        wanted = set(page_numbers or ())
         for page_index, page in enumerate(reader.pages, start=1):
+            if wanted and page_index not in wanted:
+                continue
             for image in page.images:
                 data, suffix, metadata = describe_native_pdf_image(image)
                 digest = hashlib.sha256(data).hexdigest()
@@ -2735,11 +2832,13 @@ def write_outputs(ir: dict[str, Any], warnings: list[WarningRecord], timings: li
     return exported
 
 
-def cache_path(cache_dir: Path, content_hash: str, profile: str) -> Path:
-    return cache_dir / f"{content_hash}-{profile.lower()}-{safe_slug(ENGINE_VERSION)}.json"
+def cache_path(cache_dir: Path, content_hash: str, profile: str, selection: tuple[int, ...] | None = None) -> Path:
+    token = page_selection_token(selection)
+    suffix = f"-{token}" if token else ""
+    return cache_dir / f"{content_hash}-{profile.lower()}-{safe_slug(ENGINE_VERSION)}{suffix}.json"
 
 
-def convert_file(path: Path, profile: str, output_root: Path, cache_root: Path, cache_policy: str = "use", outputs: Iterable[str] | None = None, progress: Any | None = None) -> dict[str, Any]:
+def convert_file(path: Path, profile: str, output_root: Path, cache_root: Path, cache_policy: str = "use", outputs: Iterable[str] | None = None, progress: Any | None = None, selection: tuple[int, ...] | None = None) -> dict[str, Any]:
     """Convert one file while exposing conservative, truthful milestones.
 
     The native extraction itself is a bounded third-party operation and cannot
@@ -2748,11 +2847,11 @@ def convert_file(path: Path, profile: str, output_root: Path, cache_root: Path, 
     """
     report = progress or (lambda _stage, _percent, _message: None)
     report("validating", 4, "Validating the local source")
-    preflight_input(path)
+    validate_page_selection(selection, preflight_input(path).get("declared_page_count"))
     if cache_policy not in {"use", "bypass", "refresh"}:
         raise ValueError("Cache policy must be use, bypass, or refresh.")
     content_hash = sha256_file(path)
-    cache_file = cache_path(cache_root, content_hash, profile)
+    cache_file = cache_path(cache_root, content_hash, profile, selection)
     cached = cache_policy == "use" and cache_file.exists()
     if cached:
         report("cache", 28, "Reusing verified local conversion data")
@@ -2763,12 +2862,18 @@ def convert_file(path: Path, profile: str, output_root: Path, cache_root: Path, 
         validate_ir(ir)
     else:
         report("extracting", 22, "Extracting source structure locally")
-        ir, warnings, timings = make_ir(path, profile)
+        ir, warnings, timings = make_ir(path, profile, selection)
         if cache_policy != "bypass":
             report("caching", 67, "Saving local conversion evidence")
             cache_root.mkdir(parents=True, exist_ok=True)
             atomic_write_text(cache_file, json.dumps({"ir": ir, "warnings": [asdict(warning) for warning in warnings], "timings": [asdict(timing) for timing in timings]}, ensure_ascii=False))
-    destination = output_root / f"{safe_slug(path.stem)}-{content_hash[:12]}-{profile.lower()}"
+    # The selection is part of the export's name for the same reason it is part
+    # of the cache key: a conversion of ten pages must not be written over the
+    # conversion of the whole book, nor be mistaken for it later.
+    token = page_selection_token(selection)
+    destination = output_root / (
+        f"{safe_slug(path.stem)}-{content_hash[:12]}-{profile.lower()}" + (f"-{token}" if token else "")
+    )
     selected_outputs = set(outputs or DEFAULT_OUTPUTS)
     preview_paths: list[str] = []
     extracted_assets: dict[str, Any] | None = None
@@ -2783,11 +2888,15 @@ def convert_file(path: Path, profile: str, output_root: Path, cache_root: Path, 
     reuse_artifacts = cache_policy == "use"
     if needs_source_previews:
         report("previews", 76, "Rendering source previews for review")
-        preview_paths, preview_warnings = render_source_previews(path, destination, len(ir["pages"]), reuse=reuse_artifacts)
+        converted_pages = [int(page["number"]) for page in ir["pages"]]
+        preview_paths, preview_warnings = render_source_previews(path, destination, converted_pages, reuse=reuse_artifacts)
         warnings.extend(preview_warnings)
     if "assets" in selected_outputs:
         report("assets", 86, "Extracting native source assets")
-        extracted_assets, extraction_warnings = extract_native_pdf_assets(path, destination, reuse=reuse_artifacts)
+        extracted_assets, extraction_warnings = extract_native_pdf_assets(
+            path, destination, reuse=reuse_artifacts,
+            page_numbers=[int(page["number"]) for page in ir["pages"]] if selection else None,
+        )
         warnings.extend(extraction_warnings)
         attach_native_pdf_assets_to_ir(ir, extracted_assets, destination)
         overlay_paths = render_source_overlay_diagnostics(ir, destination)
@@ -2813,6 +2922,7 @@ def convert_file(path: Path, profile: str, output_root: Path, cache_root: Path, 
         "timings": [asdict(timing) for timing in timings],
         "cache_hit": cached,
         "cache_policy": cache_policy,
+        "page_selection": compact_page_selection(selection) if selection else None,
         "created_at": now(),
     }
 
@@ -2826,6 +2936,7 @@ def action_convert(request: dict[str, Any], progress: Any | None = None) -> dict
     if profile not in {"Fast", "Balanced", "Verified"}:
         raise ValueError("Profile must be Fast, Balanced, or Verified.")
     cache_policy = config.get("cache_policy", "use")
+    selection = parse_page_selection(config.get("pages"))
     requested_outputs = config.get("outputs", DEFAULT_OUTPUTS)
     if not isinstance(requested_outputs, (list, tuple)) or not requested_outputs:
         raise ValueError("At least one output must be requested.")
@@ -2847,11 +2958,11 @@ def action_convert(request: dict[str, Any], progress: Any | None = None) -> dict
                 progress({"job_id": config.get("job_id"), "current": index + 1, "total": total, "percent": overall, "stage": stage, "message": message, "source_path": str(item)})
         try:
             report_file("starting", 1, f"Starting {item.name}")
-            results.append(convert_file(item, profile, output_root, cache_root, cache_policy, outputs, report_file))
+            results.append(convert_file(item, profile, output_root, cache_root, cache_policy, outputs, report_file, selection))
         except Exception as exc:  # batch items fail independently
             failures.append({"source_path": str(item), "error": str(exc)})
             report_file("failed", 100, f"Could not convert {item.name}")
-    return {"id": str(uuid.uuid4()), "profile": profile, "local_only": True, "outputs": outputs, "cache_policy": cache_policy, "local_repair_requested": bool(config.get("local_repair", False)), "results": results, "failures": failures, "created_at": now()}
+    return {"id": str(uuid.uuid4()), "profile": profile, "local_only": True, "outputs": outputs, "cache_policy": cache_policy, "page_selection": compact_page_selection(selection) if selection else None, "local_repair_requested": bool(config.get("local_repair", False)), "results": results, "failures": failures, "created_at": now()}
 
 
 def action_preflight(request: dict[str, Any], progress: Any | None = None) -> dict[str, Any]:

@@ -229,7 +229,7 @@ class PhilonEngineTest(unittest.TestCase):
             writer.add_blank_page(width=100, height=100)
             with source.open("wb") as stream:
                 writer.write(stream)
-            features = engine.native_pdf_features(source, 1)
+            features = engine.native_pdf_features(source, [1])
             self.assertEqual(features[0]["fonts"], [])
             self.assertEqual(features[0]["links"], [])
 
@@ -964,10 +964,10 @@ class PhilonEngineTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             source = self._small_pdf(directory)
             out = Path(directory) / "out"
-            first, _ = engine.render_source_previews(source, out, 2)
+            first, _ = engine.render_source_previews(source, out, [1, 2])
             manifest = out / "assets" / "page-previews" / "manifest.json"
             self.assertTrue(manifest.is_file())
-            again, _ = engine.render_source_previews(source, out, 2, reuse=True)
+            again, _ = engine.render_source_previews(source, out, [1, 2], reuse=True)
             self.assertEqual(first, again)
 
             # An interrupted run leaves no manifest, so it cannot be reused.
@@ -983,7 +983,7 @@ class PhilonEngineTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             source = self._small_pdf(directory)
             out = Path(directory) / "out"
-            previews, _ = engine.render_source_previews(source, out, 2)
+            previews, _ = engine.render_source_previews(source, out, [1, 2])
             manifest = out / "assets" / "page-previews" / "manifest.json"
             self.assertIsNotNone(engine.verified_artifact_manifest(manifest, source, 2))
 
@@ -1005,7 +1005,7 @@ class PhilonEngineTest(unittest.TestCase):
             other = Path(directory) / "other.pdf"
             other.write_bytes(source.read_bytes())
             out = Path(directory) / "out"
-            engine.render_source_previews(source, out, 2)
+            engine.render_source_previews(source, out, [1, 2])
             manifest = out / "assets" / "page-previews" / "manifest.json"
             self.assertIsNotNone(engine.verified_artifact_manifest(manifest, source, 2))
             self.assertIsNone(engine.verified_artifact_manifest(manifest, other, 2))
@@ -1605,6 +1605,118 @@ class SourceDeclaredLinkTest(unittest.TestCase):
         self.assertIn("&lt;b&gt; &amp; ", rendered)
         self.assertIn('href="https://a.test/?a=1&amp;b=2"', rendered)
         self.assertNotIn("<b>", rendered)
+
+
+class PageSelectionTest(unittest.TestCase):
+    """Converting part of a document, without it being mistaken for the whole."""
+
+    @staticmethod
+    def blank_pdf(path, page_count):
+        import pypdfium2 as pdfium
+
+        document = pdfium.PdfDocument.new()
+        for _ in range(page_count):
+            document.new_page(200, 200)
+        document.save(str(path))
+        document.close()
+
+    def test_pages_and_ranges_are_both_read(self):
+        self.assertEqual(engine.parse_page_selection("1-3,8"), (1, 2, 3, 8))
+        self.assertEqual(engine.parse_page_selection([3, 1, 3]), (1, 3))
+        self.assertEqual(engine.parse_page_selection("  2 - 4 "), (2, 3, 4))
+        self.assertEqual(engine.parse_page_selection("7"), (7,))
+
+    def test_no_selection_means_the_document_entire(self):
+        for value in [None, "", [], "   ", ","]:
+            self.assertIsNone(engine.parse_page_selection(value))
+
+    def test_a_selection_that_is_not_one_is_refused(self):
+        for value in ["0", "3-1", "abc", "1-", "-2", "1,x"]:
+            with self.assertRaises(ValueError, msg=value):
+                engine.parse_page_selection(value)
+
+    def test_a_selection_writes_back_in_its_shortest_form(self):
+        self.assertEqual(engine.compact_page_selection((1, 2, 3, 8)), "1-3,8")
+        self.assertEqual(engine.compact_page_selection((5,)), "5")
+        self.assertEqual(engine.compact_page_selection((1, 3, 5)), "1,3,5")
+        self.assertEqual(engine.compact_page_selection(()), "")
+
+    def test_a_page_the_document_does_not_have_is_refused(self):
+        with self.assertRaises(ValueError) as refusal:
+            engine.validate_page_selection((1, 40), 12)
+        self.assertIn("12 pages", str(refusal.exception))
+        engine.validate_page_selection((1, 12), 12)
+        engine.validate_page_selection(None, 12)
+
+    def test_part_of_a_document_never_shares_a_cache_entry_with_the_whole(self):
+        """A ten-page conversion served for a whole book would be silent data loss."""
+        cache = Path("/cache")
+        whole = engine.cache_path(cache, "abc123", "Balanced")
+        part = engine.cache_path(cache, "abc123", "Balanced", (1, 2))
+        other = engine.cache_path(cache, "abc123", "Balanced", (1, 3))
+        self.assertEqual(len({whole, part, other}), 3)
+
+    def test_a_long_selection_still_names_a_bounded_file(self):
+        long_selection = tuple(range(1, 400, 2))
+        token = engine.page_selection_token(long_selection)
+        self.assertLess(len(token), 40)
+        self.assertEqual(token, engine.page_selection_token(long_selection))
+        self.assertNotEqual(token, engine.page_selection_token(tuple(range(1, 400, 3))))
+        self.assertEqual(engine.page_selection_token(None), "")
+
+    def test_only_the_selected_pages_are_extracted_and_keep_their_numbers(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "four.pdf"
+            try:
+                self.blank_pdf(source, 4)
+            except ImportError:
+                self.skipTest("PDFium is not available")
+            selected, _ = engine.pdfium_extract(source, (2, 4))
+            self.assertEqual([page["number"] for page in selected], [2, 4])
+            whole, _ = engine.pdfium_extract(source)
+            self.assertEqual([page["number"] for page in whole], [1, 2, 3, 4])
+
+    def test_a_partial_export_is_named_and_previewed_by_real_page_number(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "four.pdf"
+            try:
+                self.blank_pdf(source, 4)
+            except ImportError:
+                self.skipTest("PDFium is not available")
+            result = engine.convert_file(source, "Balanced", root / "exports", root / "cache",
+                                         cache_policy="bypass", selection=(2, 3))
+            self.assertEqual(result["page_selection"], "2-3")
+            previews = [Path(item).name for item in result["outputs"].get("assets", [])]
+            self.assertEqual(previews, ["page-0002.png", "page-0003.png"])
+            exports = list((root / "exports").iterdir())
+            self.assertTrue(any("pages-2-3" in item.name for item in exports), exports)
+
+    def test_a_partial_export_never_overwrites_the_whole_one(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "four.pdf"
+            try:
+                self.blank_pdf(source, 4)
+            except ImportError:
+                self.skipTest("PDFium is not available")
+            engine.convert_file(source, "Balanced", root / "exports", root / "cache",
+                                cache_policy="bypass")
+            engine.convert_file(source, "Balanced", root / "exports", root / "cache",
+                                cache_policy="bypass", selection=(2,))
+            self.assertEqual(len(list((root / "exports").iterdir())), 2)
+
+    def test_a_selection_beyond_the_document_fails_before_extraction(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "four.pdf"
+            try:
+                self.blank_pdf(source, 4)
+            except ImportError:
+                self.skipTest("PDFium is not available")
+            with self.assertRaises(ValueError):
+                engine.convert_file(source, "Balanced", root / "exports", root / "cache",
+                                    cache_policy="bypass", selection=(9,))
 
 
 if __name__ == "__main__":
