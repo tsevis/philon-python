@@ -65,6 +65,29 @@ def link_summary(links: list[dict[str, Any]]) -> str:
     return f"{len(anchorable)} anchored, {withheld} withheld as unanchorable"
 
 
+def ruled_table_summary(block: dict[str, Any] | None, page: dict[str, Any] | None) -> str:
+    """Say what the page's own rules came to, for the selected block.
+
+    A lattice that does not close is counted rather than hidden. It is the case
+    where Philon found the shape of a table and refused to guess its cells, and
+    a reviewer looking for a table that did not arrive should be told that is
+    what happened rather than left to conclude nothing was found.
+    """
+    recovered = (block or {}).get("table")
+    if recovered:
+        return f"{recovered.get('row_count')} × {recovered.get('column_count')} recovered from ruled geometry"
+    grids = (page or {}).get("ruled_tables") or []
+    if not grids:
+        return "None ruled"
+    closed = sum(1 for grid in grids if grid.get("complete"))
+    open_grids = len(grids) - closed
+    if not open_grids:
+        return f"{closed} recovered on this page"
+    if not closed:
+        return f"{open_grids} ruled, none closing into a full grid"
+    return f"{closed} recovered, {open_grids} not closed"
+
+
 def candidates_of(block: dict[str, Any] | None) -> list[dict[str, Any]]:
     raw = (block or {}).get("evidence", {}).get("alternatives")
     if not isinstance(raw, list):
@@ -244,6 +267,7 @@ class EvidencePanel(QFrame):
             ("Source region", f"Measured · {str((block or {}).get('bbox', {}).get('coordinate_space', '')).replace('-', ' ')}" if (block or {}).get("bbox") else "No measured region"),
             ("Page rotation", f"{int(page.get('rotation') or 0)}°, measured as displayed" if page.get("rotation") else "Upright"),
             ("Source links", link_summary((block or {}).get("links") or [])),
+            ("Ruled tables", ruled_table_summary(block, page)),
             ("Native assets", f"{len(assets.get('items', []))} extracted with provenance" if assets else "None extracted"),
             ("Source markers", str(len(markers)) if markers else "None"),
             ("Overlay diagnostics", f"{len(overlays)} pages mapped" if overlays else "No measured overlays"),

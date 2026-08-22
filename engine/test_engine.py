@@ -1733,7 +1733,7 @@ class IrVersionTest(unittest.TestCase):
         document.close()
 
     def test_the_ir_records_the_version_it_was_written_against(self):
-        self.assertEqual(engine.IR_VERSION, "0.3.0")
+        self.assertEqual(engine.IR_VERSION, "0.4.0")
 
     def test_an_ir_from_another_version_is_not_accepted(self):
         ir = {"philon_ir_version": "0.2.0", "pages": [], "blocks": []}
@@ -1804,6 +1804,448 @@ class IrVersionTest(unittest.TestCase):
             second = engine.convert_file(source, "Balanced", root / "exports", cache)
             self.assertFalse(first["cache_hit"])
             self.assertTrue(second["cache_hit"])
+
+
+class RuledTableRecoveryTest(unittest.TestCase):
+    """A table the page rules is recovered from the rules, not from its text.
+
+    The fixtures are assembled byte by byte so the geometry under test is the
+    geometry written here: text drawn at known points, rules stroked at known
+    coordinates, and nothing a producer might have added in between.
+    """
+
+    @staticmethod
+    def page_pdf(path, content, rotation=0):
+        """One Helvetica page carrying a given content stream, under a /Rotate."""
+        objects = [
+            b"<< /Type /Catalog /Pages 2 0 R >>",
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            (f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Rotate {rotation} "
+             "/Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>").encode(),
+            b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+            b"<< /Length " + str(len(content)).encode() + b" >>\nstream\n" + content + b"endstream",
+        ]
+        out = bytearray(b"%PDF-1.4\n")
+        offsets = []
+        for number, body in enumerate(objects, start=1):
+            offsets.append(len(out))
+            out += f"{number} 0 obj\n".encode() + body + b"\nendobj\n"
+        start_xref = len(out)
+        out += f"xref\n0 {len(objects) + 1}\n".encode() + b"0000000000 65535 f \n"
+        for offset in offsets:
+            out += f"{offset:010d} 00000 n \n".encode()
+        out += (f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\n"
+                f"startxref\n{start_xref}\n").encode() + b"%%EOF\n"
+        Path(path).write_bytes(bytes(out))
+
+    #: The cells of the fixture table, and where each is drawn.
+    CELLS = (
+        ("Region", 70, 682), ("Q1", 230, 682), ("Q2", 350, 682),
+        ("North", 70, 658), ("14", 230, 658), ("19", 350, 658),
+        ("South", 70, 634), ("22", 230, 634), ("27", 350, 634),
+    )
+    RECOVERED = [["Region", "Q1", "Q2"], ["North", "14", "19"], ["South", "22", "27"]]
+
+    @classmethod
+    def table_content(cls, horizontals, verticals):
+        """Nine text cells, then the rules that enclose them."""
+        parts = [b"BT /F1 11 Tf\n"]
+        for text, x, y in cls.CELLS:
+            parts.append(f"1 0 0 1 {x} {y} Tm ({text}) Tj\n".encode())
+        parts.append(b"ET\n0.6 w 0 0 0 RG\n")
+        for y, left, right in horizontals:
+            parts.append(f"{left} {y} m {right} {y} l S\n".encode())
+        for x, bottom, top in verticals:
+            parts.append(f"{x} {bottom} m {x} {top} l S\n".encode())
+        return b"".join(parts)
+
+    @classmethod
+    def ruled_pdf(cls, path, rotation=0):
+        """A 3x3 table whose every rule runs the full width or height."""
+        cls.page_pdf(path, cls.table_content(
+            [(y, 60, 460) for y in (628, 652, 676, 700)],
+            [(x, 628, 700) for x in (60, 220, 340, 460)],
+        ), rotation)
+
+    @classmethod
+    def partly_ruled_pdf(cls, path):
+        """The same cells, with one rule stopping short of the row below it."""
+        cls.page_pdf(path, cls.table_content(
+            [(y, 60, 460) for y in (628, 652, 676, 700)],
+            [(60, 628, 700), (220, 652, 700), (340, 628, 700), (460, 628, 700)],
+        ))
+
+    @classmethod
+    def unruled_pdf(cls, path):
+        """The same cells with no rules at all: a table only to the eye."""
+        parts = [b"BT /F1 11 Tf\n"]
+        for text, x, y in cls.CELLS:
+            parts.append(f"1 0 0 1 {x} {y} Tm ({text}) Tj\n".encode())
+        parts.append(b"ET\n")
+        cls.page_pdf(path, b"".join(parts))
+
+    def recovered_page(self, build, rotation=0):
+        """Extract one built fixture, skipping where PDFium is unavailable."""
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "table.pdf"
+            build(source) if rotation == 0 else build(source, rotation)
+            pages, _ = engine.pdfium_extract(source)
+            if not pages or pages[0].get("method") != "pdfium-native":
+                self.skipTest("PDFium is not available for extraction")
+            return pages[0]
+
+    # -- the rule itself -------------------------------------------------
+
+    def test_a_long_thin_rectangle_is_a_rule_on_its_long_axis(self):
+        wide = engine.make_bbox(60, 627.4, 460, 628.6, "pdf-page-points")
+        tall = engine.make_bbox(59.4, 628, 60.6, 700, "pdf-page-points")
+        self.assertEqual(engine.rule_from_bbox(wide)["axis"], "horizontal")
+        self.assertEqual(engine.rule_from_bbox(wide)["position"], 628)
+        self.assertEqual(engine.rule_from_bbox(tall)["axis"], "vertical")
+        self.assertEqual(engine.rule_from_bbox(tall)["position"], 60)
+
+    def test_a_filled_rectangle_is_read_as_the_rule_it_draws(self):
+        """Bounds, not segments: a rule is as often a fill as a stroke."""
+        filled = engine.make_bbox(60, 626, 460, 628, "pdf-page-points")
+        self.assertEqual(engine.rule_from_bbox(filled)["axis"], "horizontal")
+
+    def test_a_shape_that_is_not_thin_or_not_long_is_not_a_rule(self):
+        self.assertIsNone(engine.rule_from_bbox(engine.make_bbox(60, 600, 460, 700, "pdf-page-points")))
+        self.assertIsNone(engine.rule_from_bbox(engine.make_bbox(60, 628, 68, 629, "pdf-page-points")))
+        self.assertIsNone(engine.rule_from_bbox(None))
+
+    # -- collapsing rules onto lines --------------------------------------
+
+    def test_near_equal_positions_collapse_to_one_line_at_their_mean(self):
+        self.assertEqual(engine.cluster_positions([100.0, 100.4, 99.8, 300.0], 2.0), [100.0667, 300.0])
+        self.assertEqual(engine.cluster_positions([], 2.0), [])
+
+    def test_positions_further_apart_than_the_tolerance_stay_separate(self):
+        self.assertEqual(engine.cluster_positions([100.0, 103.0], 2.0), [100.0, 103.0])
+
+    def test_a_line_keeps_the_separate_runs_it_is_drawn_in(self):
+        """Two tables side by side must not be joined across the gap."""
+        rules = [
+            {"position": 100.0, "start": 60.0, "end": 200.0},
+            {"position": 100.2, "start": 400.0, "end": 540.0},
+        ]
+        line = engine.merge_rules(rules, 2.0)[0]
+        self.assertEqual(line["segments"], [(60.0, 200.0), (400.0, 540.0)])
+        self.assertEqual((line["start"], line["end"]), (60.0, 540.0))
+
+    def test_a_rule_crossing_a_gap_between_runs_does_not_meet_the_line(self):
+        horizontal = engine.merge_rules([
+            {"position": 100.0, "start": 60.0, "end": 200.0},
+            {"position": 100.0, "start": 400.0, "end": 540.0},
+        ], 2.0)[0]
+        through_a_run = {"position": 120.0, "segments": [(60.0, 140.0)]}
+        through_the_gap = {"position": 300.0, "segments": [(60.0, 140.0)]}
+        self.assertTrue(engine.rules_cross(horizontal, through_a_run, 2.0))
+        self.assertFalse(engine.rules_cross(horizontal, through_the_gap, 2.0))
+
+    # -- finding the grid --------------------------------------------------
+
+    @staticmethod
+    def lines(positions, start, end):
+        return [{"position": position, "segments": [(start, end)], "start": start, "end": end}
+                for position in positions]
+
+    def test_crossing_rules_make_a_grid_and_its_cells_are_proven(self):
+        grids = engine.ruled_table_grids(self.lines([628, 652, 676, 700], 60, 460),
+                                         self.lines([60, 220, 340, 460], 628, 700))
+        self.assertEqual(len(grids), 1)
+        self.assertTrue(grids[0]["complete"])
+        self.assertEqual(grids[0]["row_lines"], [628, 652, 676, 700])
+        self.assertEqual(grids[0]["crossing_count"], 16)
+
+    def test_a_single_pair_of_rules_is_not_a_grid(self):
+        self.assertEqual(engine.ruled_table_grids(self.lines([628], 60, 460),
+                                                  self.lines([60], 628, 700)), [])
+        self.assertEqual(engine.ruled_table_grids(self.lines([628, 700], 60, 460),
+                                                  self.lines([60], 628, 700)), [])
+
+    def test_rules_that_never_meet_make_no_grid(self):
+        self.assertEqual(engine.ruled_table_grids(self.lines([628, 652], 60, 200),
+                                                  self.lines([400, 460], 628, 700)), [])
+
+    def test_two_tables_on_one_page_stay_two_grids(self):
+        horizontals = self.lines([700, 660], 60, 200) + self.lines([400, 360], 60, 200)
+        verticals = [
+            {"position": 60, "segments": [(660, 700)], "start": 660, "end": 700},
+            {"position": 200, "segments": [(660, 700)], "start": 660, "end": 700},
+            {"position": 60, "segments": [(360, 400)], "start": 360, "end": 400},
+            {"position": 200, "segments": [(360, 400)], "start": 360, "end": 400},
+        ]
+        grids = engine.ruled_table_grids(horizontals, verticals)
+        self.assertEqual(len(grids), 2)
+        # Topmost first, so a document's tables arrive in reading order.
+        self.assertEqual([grid["row_lines"][-1] for grid in grids], [700, 400])
+
+    def test_a_lattice_that_does_not_close_is_marked_rather_than_completed(self):
+        verticals = self.lines([60, 340, 460], 628, 700)
+        verticals.append({"position": 220, "segments": [(652, 700)], "start": 652, "end": 700})
+        grids = engine.ruled_table_grids(self.lines([628, 652, 676, 700], 60, 460), verticals)
+        self.assertEqual(len(grids), 1)
+        self.assertFalse(grids[0]["complete"])
+
+    # -- reading the cells -------------------------------------------------
+
+    def test_a_character_is_placed_by_its_own_centre(self):
+        grid = {"row_lines": [0.0, 10.0, 20.0], "column_lines": [0.0, 10.0, 20.0]}
+        characters = [
+            ("A", engine.make_bbox(1, 11, 3, 19, "pdf-page-points")),
+            ("B", engine.make_bbox(11, 11, 13, 19, "pdf-page-points")),
+            ("C", engine.make_bbox(1, 1, 3, 9, "pdf-page-points")),
+        ]
+        # Row 0 is the topmost band, though its lines are the last two.
+        self.assertEqual(engine.table_cell_text(characters, grid), [["A", "B"], ["C", ""]])
+
+    def test_a_cell_no_character_falls_inside_stays_empty(self):
+        grid = {"row_lines": [0.0, 10.0], "column_lines": [0.0, 10.0, 20.0]}
+        characters = [("A", engine.make_bbox(1, 1, 3, 9, "pdf-page-points"))]
+        self.assertEqual(engine.table_cell_text(characters, grid), [["A", ""]])
+
+    def test_a_character_outside_every_cell_is_left_out(self):
+        grid = {"row_lines": [0.0, 10.0], "column_lines": [0.0, 10.0]}
+        characters = [("A", engine.make_bbox(50, 50, 52, 58, "pdf-page-points")), ("B", None)]
+        self.assertEqual(engine.table_cell_text(characters, grid), [[""]])
+
+    def test_a_gap_in_the_read_order_becomes_a_space(self):
+        """A character PDFium gives no rectangle for is one it drew nothing for."""
+        grid = {"row_lines": [0.0, 10.0], "column_lines": [0.0, 20.0]}
+        characters = [
+            ("N", engine.make_bbox(1, 1, 3, 9, "pdf-page-points")),
+            (" ", None),
+            ("A", engine.make_bbox(5, 1, 7, 9, "pdf-page-points")),
+        ]
+        self.assertEqual(engine.table_cell_text(characters, grid), [["N A"]])
+
+    # -- the page, end to end ----------------------------------------------
+
+    def test_a_ruled_page_yields_exactly_the_table_it_draws(self):
+        page = self.recovered_page(self.ruled_pdf)
+        self.assertEqual(len(page["ruled_tables"]), 1)
+        recovered = page["ruled_tables"][0]
+        self.assertTrue(recovered["complete"])
+        self.assertEqual((recovered["row_count"], recovered["column_count"]), (3, 3))
+        self.assertEqual(recovered["rows"], self.RECOVERED)
+
+    def test_the_recovered_rectangle_is_the_table_the_rules_enclose(self):
+        recovered = self.recovered_page(self.ruled_pdf)["ruled_tables"][0]
+        box = recovered["bbox"]
+        self.assertEqual((box["x0"], box["y0"], box["x1"], box["y1"]), (60.0, 628.0, 460.0, 700.0))
+        self.assertEqual(box["coordinate_space"], "pdf-page-points")
+
+    def test_the_table_becomes_one_block_carrying_its_rows(self):
+        page = self.recovered_page(self.ruled_pdf)
+        page["body_font"], page["body_size"] = "", 0.0
+        parts = engine.geometric_native_parts(page, set())
+        self.assertEqual(len(parts), 1)
+        self.assertEqual(parts[0]["table_rows"], self.RECOVERED)
+        block = engine.make_block(page, 1, parts[0]["text"], parts[0]["start"], parts[0]["end"],
+                                  None, parts[0].get("table_rows"), parts[0].get("table_bbox"))
+        self.assertEqual(block["type"], "table")
+        self.assertEqual(block["table"]["rows"], self.RECOVERED)
+        self.assertEqual(block["table"]["source"], "ruled-geometry")
+        self.assertTrue(block["evidence"]["findings"]["ruled_table_recovered"])
+        self.assertEqual(block["evidence"]["findings"]["ruled_table_cell_count"], 9)
+        # The block is bounded by the rules, not by the characters inside them.
+        self.assertEqual(block["bbox"]["x0"], 60.0)
+
+    def test_the_recovered_table_reaches_every_export(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "table.pdf"
+            self.ruled_pdf(source)
+            ir, warnings, _ = engine.make_ir(source, "Standard")
+            if ir["pages"][0]["method"] != "pdfium-native":
+                self.skipTest("PDFium is not available for extraction")
+            self.assertEqual(ir["philon_ir_version"], "0.4.0")
+            self.assertEqual(ir["pages"][0]["ruled_tables"][0]["row_count"], 3)
+            table = next(block for block in ir["blocks"] if block["type"] == "table")
+            self.assertEqual(engine.block_table_rows(table), self.RECOVERED)
+
+            markdown = engine.render_markdown(ir)
+            self.assertIn("| Region | Q1 | Q2 |", markdown)
+            self.assertIn("| --- | --- | --- |", markdown)
+            self.assertIn("| South | 22 | 27 |", markdown)
+
+            document = engine.render_html(ir)
+            self.assertIn("<th scope=\"col\">Region</th>", document)
+            self.assertIn("<td>27</td>", document)
+
+            groups = engine.table_export_groups(ir["blocks"])
+            self.assertEqual(len(groups), 1)
+            self.assertEqual(groups[0]["rows"], self.RECOVERED)
+            self.assertNotIn("RULED_TABLE_INCOMPLETE", [warning.code for warning in warnings])
+
+    def test_the_table_survives_the_page_the_source_never_delimited(self):
+        """The proof: the block's own text carries no delimiter to parse."""
+        page = self.recovered_page(self.ruled_pdf)
+        self.assertIsNone(engine.table_rows(page["text"]))
+        self.assertNotIn("|", page["text"])
+        self.assertNotIn("\t", page["text"])
+
+    def test_a_table_interrupted_mid_way_is_still_one_block(self):
+        """The defect this fixes: it was emitted twice, each copy holding every row.
+
+        A table's lines need not arrive in one unbroken run. A line whose centre
+        falls just outside the rules -- or a caption PDFium reads between two
+        rows -- closed the block early, and the next line inside the rules
+        opened a second block carrying the same recovered rows into Markdown and
+        into the CSV.
+        """
+        inside = engine.make_bbox(70, 680, 400, 692, "pdf-page-points")
+        below = engine.make_bbox(70, 656, 400, 668, "pdf-page-points")
+        outside = engine.make_bbox(70, 400, 400, 412, "pdf-page-points")
+        page = {
+            "text": "Region Q1\nA stray caption\nNorth 14",
+            "body_font": "", "body_size": 0.0,
+            "native_text_lines": [
+                {"text": "Region Q1", "start": 0, "end": 9, "bbox": inside},
+                {"text": "A stray caption", "start": 10, "end": 25, "bbox": outside},
+                {"text": "North 14", "start": 26, "end": 34, "bbox": below},
+            ],
+            "ruled_tables": [{
+                "complete": True,
+                "bbox": engine.make_bbox(60, 640, 460, 700, "pdf-page-points"),
+                "rows": [["Region", "Q1"], ["North", "14"]],
+                "row_count": 2, "column_count": 2, "crossing_count": 9,
+            }],
+        }
+        parts = engine.geometric_native_parts(page, set())
+        with_rows = [part for part in parts if part.get("table_rows")]
+        self.assertEqual(len(with_rows), 1)
+        self.assertEqual(with_rows[0]["text"], "Region Q1\nNorth 14")
+        self.assertEqual(with_rows[0]["table_rows"], [["Region", "Q1"], ["North", "14"]])
+        # ...and the line that fell outside the rules is still its own block.
+        self.assertIn("A stray caption", [part["text"] for part in parts])
+
+    def test_an_incomplete_lattice_never_reaches_the_segmenter(self):
+        page = {
+            "text": "Region Q1", "body_font": "", "body_size": 0.0,
+            "native_text_lines": [
+                {"text": "Region Q1", "start": 0, "end": 9,
+                 "bbox": engine.make_bbox(70, 680, 400, 692, "pdf-page-points")},
+            ],
+            "ruled_tables": [{
+                "complete": False,
+                "bbox": engine.make_bbox(60, 640, 460, 700, "pdf-page-points"),
+                "rows": [], "row_count": 2, "column_count": 2, "crossing_count": 8,
+            }],
+        }
+        self.assertFalse([part for part in engine.geometric_native_parts(page, set()) if part.get("table_rows")])
+
+    # -- rotation ------------------------------------------------------------
+
+    def test_a_rotated_page_is_measured_in_the_frame_it_is_displayed_in(self):
+        """Classify after the turn, or a landscape table arrives transposed."""
+        for rotation in (0, 90, 180, 270):
+            with self.subTest(rotation=rotation):
+                page = self.recovered_page(self.ruled_pdf, rotation)
+                self.assertEqual(len(page["ruled_tables"]), 1)
+                recovered = page["ruled_tables"][0]
+                self.assertTrue(recovered["complete"])
+                self.assertEqual((recovered["row_count"], recovered["column_count"]), (3, 3))
+                box = recovered["bbox"]
+                self.assertGreaterEqual(box["x0"], 0)
+                self.assertGreaterEqual(box["y0"], 0)
+                self.assertLessEqual(box["x1"], page["width"])
+                self.assertLessEqual(box["y1"], page["height"])
+                self.assertEqual(sorted(cell for row in recovered["rows"] for cell in row),
+                                 sorted(cell for row in self.RECOVERED for cell in row))
+
+    def test_a_quarter_turn_turns_the_table_it_displays(self):
+        """The fixture is drawn upright and then turned, so on screen it lies on
+        its side -- and the recovery reports the table a reader is shown, which
+        is the upright one rotated, not the upright one quietly restored.
+
+        This is the whole reason the rules are classified after the frame
+        conversion rather than before it. A real landscape table is the mirror
+        of this fixture: drawn sideways so that /Rotate sets it upright, and
+        there the same rule is what keeps its rows from arriving as columns.
+        """
+        upright = self.recovered_page(self.ruled_pdf)["ruled_tables"][0]["rows"]
+        turned = self.recovered_page(self.ruled_pdf, 270)["ruled_tables"][0]["rows"]
+        self.assertEqual([list(column) for column in zip(*upright)][::-1], turned)
+
+    # -- prove or mark --------------------------------------------------------
+
+    def test_a_lattice_that_does_not_close_is_reported_and_not_emitted(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "partial.pdf"
+            self.partly_ruled_pdf(source)
+            ir, warnings, _ = engine.make_ir(source, "Standard")
+            if ir["pages"][0]["method"] != "pdfium-native":
+                self.skipTest("PDFium is not available for extraction")
+            recovered = ir["pages"][0]["ruled_tables"]
+            self.assertEqual(len(recovered), 1)
+            self.assertFalse(recovered[0]["complete"])
+            self.assertIn("RULED_TABLE_INCOMPLETE", [warning.code for warning in warnings])
+            self.assertFalse([block for block in ir["blocks"] if block.get("table")])
+
+    def test_a_table_only_the_eye_can_see_is_never_emitted_as_one(self):
+        """Whitespace alignment is inference. Philon proves or marks."""
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "unruled.pdf"
+            self.unruled_pdf(source)
+            ir, _, _ = engine.make_ir(source, "Standard")
+            if ir["pages"][0]["method"] != "pdfium-native":
+                self.skipTest("PDFium is not available for extraction")
+            self.assertEqual(ir["pages"][0]["ruled_tables"], [])
+            self.assertFalse([block for block in ir["blocks"] if block.get("table")])
+            self.assertFalse([block for block in ir["blocks"] if block["type"] == "table"])
+
+    # -- the shape the IR promises --------------------------------------------
+
+    def test_a_ragged_recovered_table_is_refused_before_a_consumer_sees_it(self):
+        ir = {
+            "philon_ir_version": engine.IR_VERSION,
+            "pages": [{"id": "page-1"}],
+            "blocks": [{"id": "page-1-block-1", "page": "page-1", "type": "table", "text": "x",
+                        "table": {"rows": [["a", "b"], ["c"]]}}],
+        }
+        with self.assertRaises(ValueError):
+            engine.validate_ir(ir)
+
+    def test_a_recovered_table_without_rows_is_refused(self):
+        ir = {
+            "philon_ir_version": engine.IR_VERSION,
+            "pages": [{"id": "page-1"}],
+            "blocks": [{"id": "page-1-block-1", "page": "page-1", "type": "table", "text": "x",
+                        "table": {"rows": []}}],
+        }
+        with self.assertRaises(ValueError):
+            engine.validate_ir(ir)
+
+    def test_recovered_rows_outrank_a_delimited_reading_of_the_same_block(self):
+        block = {"text": "a\tb\nc\td", "table": {"rows": [["Region", "Q1"], ["North", "14"]]}}
+        self.assertEqual(engine.block_table_rows(block), [["Region", "Q1"], ["North", "14"]])
+        self.assertEqual(engine.block_table_rows({"text": "a\tb\nc\td"}), [["a", "b"], ["c", "d"]])
+
+    def test_a_cell_containing_a_pipe_does_not_split_the_markdown_column(self):
+        self.assertEqual(engine.markdown_table_cell("a|b"), "a\\|b")
+        ir = {
+            "philon_ir_version": engine.IR_VERSION,
+            "document": {"source": {"filename": "t.pdf"}},
+            "pages": [{"id": "page-1", "number": 1}],
+            "blocks": [{"id": "page-1-block-1", "page": "page-1", "type": "table", "level": None,
+                        "text": "x", "links": [],
+                        "source": {"method": "pdfium-native", "confidence": 1.0, "language": "und"},
+                        "table": {"rows": [["a|b", "c"], ["d", "e"]]}}],
+        }
+        row = next(line for line in engine.render_markdown(ir).splitlines() if line.startswith("| a"))
+        self.assertEqual(row, "| a\\|b | c |")
+
+    # -- guards ----------------------------------------------------------------
+
+    def test_a_page_of_drawings_is_not_searched_for_a_grid(self):
+        """Past the cap the page is a chart, and pairing every line is quadratic."""
+        many = self.lines(list(range(engine.MAX_RULE_LINES_PER_AXIS + 1)), 0, 500)
+        self.assertEqual(engine.ruled_table_grids(many, self.lines([10, 20], 0, 500)), [])
+
+    def test_a_page_that_draws_nothing_reports_no_rules(self):
+        page = self.recovered_page(self.unruled_pdf)
+        self.assertEqual(page["ruled_tables"], [])
 
 
 if __name__ == "__main__":
