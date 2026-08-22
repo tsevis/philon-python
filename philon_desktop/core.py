@@ -134,6 +134,13 @@ class LocalStore:
             rows = db.execute("SELECT id, created_at, profile, status, documents, warnings FROM jobs ORDER BY created_at DESC LIMIT 50").fetchall()
         return [dict(row) for row in rows]
 
+    def clear_jobs(self) -> int:
+        """Remove every library record; exported files are never touched."""
+        with self.connection() as db:
+            removed = db.execute("SELECT COUNT(*) AS count FROM jobs").fetchone()["count"]
+            db.execute("DELETE FROM jobs")
+        return int(removed)
+
     def job_payload(self, job_id: str) -> dict[str, Any]:
         with self.connection() as db:
             row = db.execute("SELECT payload FROM jobs WHERE id=?", (job_id,)).fetchone()
@@ -228,22 +235,32 @@ class PhilonService:
         engine.VISION_HELPER = bundled_helper if bundled_helper.exists() else None
 
     def preferences(self) -> dict[str, Any]:
-        return self.store.setting("preferences", {"profile": "Balanced", "cache_policy": "use", "outputs": list(DEFAULT_OUTPUTS)})
+        return self.store.setting("preferences", {"profile": "Balanced", "cache_policy": "use", "outputs": list(DEFAULT_OUTPUTS), "enabled_model_ids": []})
 
     def save_preferences(self, values: dict[str, Any]) -> None:
         profile = values.get("profile", "Balanced")
         outputs = values.get("outputs", list(DEFAULT_OUTPUTS))
-        if profile not in PROFILES or values.get("cache_policy", "use") not in {"use", "refresh", "bypass"} or not isinstance(outputs, list) or not outputs:
-            raise ValueError("Preferences contain an unsupported profile, cache policy, or empty output selection.")
+        enabled_model_ids = values.get("enabled_model_ids", [])
+        valid_models = isinstance(enabled_model_ids, list) and all(isinstance(item, str) for item in enabled_model_ids)
+        if profile not in PROFILES or values.get("cache_policy", "use") not in {"use", "refresh", "bypass"} or not isinstance(outputs, list) or not outputs or not valid_models:
+            raise ValueError("Preferences contain an unsupported profile, cache policy, model list, or empty output selection.")
         self.store.save_setting("preferences", values)
 
     def preflight(self, paths: Iterable[str], progress: Callable[[dict[str, Any]], None] | None = None) -> dict[str, Any]:
         return engine.action_preflight({"config": {"input_paths": list(paths)}}, progress)
 
-    def convert(self, paths: Iterable[str], profile: str, cache_policy: str, outputs: Iterable[str], progress: Callable[[dict[str, Any]], None] | None = None) -> dict[str, Any]:
+    def parse_pages(self, text: str) -> tuple[int, ...] | None:
+        """Read a page selection the way the engine will, so the interface can
+        refuse a malformed one before a job is started rather than after."""
+        return engine.parse_page_selection(text)
+
+    def convert(self, paths: Iterable[str], profile: str, cache_policy: str, outputs: Iterable[str], progress: Callable[[dict[str, Any]], None] | None = None, pages: tuple[int, ...] | None = None) -> dict[str, Any]:
         if profile not in PROFILES:
             raise ValueError("Profile must be Fast, Balanced, or Verified.")
-        payload = engine.action_convert({"config": {"input_paths": list(paths), "profile": profile, "workspace_dir": str(self.workspace_dir), "cache_policy": cache_policy, "outputs": list(outputs)}}, progress)
+        config = {"input_paths": list(paths), "profile": profile, "workspace_dir": str(self.workspace_dir), "cache_policy": cache_policy, "outputs": list(outputs)}
+        if pages:
+            config["pages"] = list(pages)
+        payload = engine.action_convert({"config": config}, progress)
         self.store.store_job(payload)
         return payload
 
@@ -295,8 +312,11 @@ class PhilonService:
     def apply_review(self, ir_path: str, block_id: str, action: str, text: str | None = None, candidate_index: int | None = None) -> dict[str, Any]:
         return engine.action_review({"ir_path": ir_path, "block_id": block_id, "review_action": action, "text": text, "candidate_index": candidate_index})
 
-    def request_repair(self, ir_path: str, block_id: str, repair_mode: str, progress: Callable[[dict[str, Any]], None] | None = None) -> dict[str, Any]:
-        return engine.action_repair({"ir_path": ir_path, "block_id": block_id, "repair_mode": repair_mode}, progress)
+    def request_repair(self, ir_path: str, block_id: str, repair_mode: str, progress: Callable[[dict[str, Any]], None] | None = None, enabled_model_ids: list[str] | None = None) -> dict[str, Any]:
+        request: dict[str, Any] = {"ir_path": ir_path, "block_id": block_id, "repair_mode": repair_mode}
+        if enabled_model_ids is not None:
+            request["enabled_model_ids"] = list(enabled_model_ids)
+        return engine.action_repair(request, progress)
 
     def models(self) -> dict[str, Any]:
         return engine.model_status()

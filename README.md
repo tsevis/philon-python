@@ -6,7 +6,7 @@ The application is local-first and offline by default. It has no cloud providers
 
 ## What is included
 
-- Native **Single Job** and **Batch** workspaces, with Library, Models, Diagnostics, and Settings as secondary navigation.
+- The source macOS application's GUI, ported panel for panel: header navigation with a Library count badge, the workspace command bar with **Single Job** and **Batch** job tabs, the three-column conversion grid, batch queue/report, Library, Models, Diagnostics and Settings workspaces, the first-launch splash, and light/dark appearances that follow the system.
 - The canonical PDFium/Python conversion engine: bounded PDF/image preflight, native extraction, adaptive Apple Vision routing, source geometry, confidence, warnings, citations, cross-page tables, and evidence retention.
 - Markdown, semantic HTML, Philon IR, clean-room Marker-style JSON, chunks, optional verified BGE-M3 embeddings, source assets, CSV tables, evidence reports, previews/overlays, and hashed output manifests.
 - A page preview with page navigation, fit/actual-size controls, selected-block source-region overlays, block review/editing, retained candidates, and source-crop opening for manual repair candidates.
@@ -58,9 +58,17 @@ it has something to release, so the two numbers drift apart on purpose rather
 than one being bumped to match a fix it does not contain. This port is 0.2.3
 while Philon is 0.2.2.
 
-What does have to match is the engine contract and the IR version, and both
-remain at 0.2.0: a document converted by either project at any 0.2.x carries
-the same evidence.
+What does have to match is the engine contract and the IR version. The engine
+contract remains at 0.2.0. The IR is at **0.3.0** in both projects: it gained
+the page's own `/Rotate`, the source-declared links measured onto each block,
+and the page selection a conversion covers, so a document converted by either
+project at that IR version carries the same evidence and says so in
+`philon_ir_version`.
+
+A cache entry is named after the IR version it holds, so an entry written
+against an older shape is never reached rather than being read and rejected. An
+entry that cannot be read back is recomputed from the source: reuse is an
+optimisation, and a broken optimisation must not be able to refuse a document.
 
 **0.2.3** — Packaging builds from the project virtual environment instead of
 whatever interpreter is on `PATH`. PyInstaller collects what it can import, so

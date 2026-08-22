@@ -17,6 +17,7 @@ SOURCES = [
     ROOT / "engine" / "philon_engine.py",
     ROOT / "philon_desktop" / "core.py",
     ROOT / "philon_desktop" / "app.py",
+    *sorted((ROOT / "philon_desktop" / "gui").glob("*.py")),
     ROOT / "philon_launcher.py",
     ROOT / "bench" / "run.py",
     ROOT / "requirements.txt",

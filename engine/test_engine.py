@@ -229,7 +229,7 @@ class PhilonEngineTest(unittest.TestCase):
             writer.add_blank_page(width=100, height=100)
             with source.open("wb") as stream:
                 writer.write(stream)
-            features = engine.native_pdf_features(source, 1)
+            features = engine.native_pdf_features(source, [1])
             self.assertEqual(features[0]["fonts"], [])
             self.assertEqual(features[0]["links"], [])
 
@@ -715,8 +715,22 @@ class PhilonEngineTest(unittest.TestCase):
         self.assertIn(engine.normalise_artifact("Diffusion-based Image Mosaics GI 26"), artifacts)
 
     def test_a_line_that_merely_repeats_a_few_times_is_not_a_running_head(self):
-        """The control: strong evidence is still required."""
-        pages = [{"number": n, "text": f"Ordinary opening line {n}\nBody sentence number {n}.\n{n}"}
+        """The control: strong evidence is still required.
+
+        The distinct openings vary by wording, not by a trailing number. A line
+        that differs from its neighbours only by its folio *is* a running head,
+        and setting that number aside before counting is what stops one leaking
+        into the body of every page; numbering these would have made the
+        fixture an example of the thing it exists to exclude.
+        """
+        openings = [
+            "An ordinary opening line", "A different way to begin",
+            "Another beginning entirely", "Something else opens here",
+            "A fresh opening sentence", "Yet another first line",
+            "This page starts differently", "A new opening again",
+            "One more distinct opening", "A last distinct opening",
+        ]
+        pages = [{"number": n, "text": f"{openings[n - 1]}\nBody sentence number {n}.\n{n}"}
                  for n in range(1, 11)]
         pages[0]["text"] = "A shared opening line\nBody sentence number 1.\n1"
         pages[1]["text"] = "A shared opening line\nBody sentence number 2.\n2"
@@ -950,10 +964,10 @@ class PhilonEngineTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             source = self._small_pdf(directory)
             out = Path(directory) / "out"
-            first, _ = engine.render_source_previews(source, out, 2)
+            first, _ = engine.render_source_previews(source, out, [1, 2])
             manifest = out / "assets" / "page-previews" / "manifest.json"
             self.assertTrue(manifest.is_file())
-            again, _ = engine.render_source_previews(source, out, 2, reuse=True)
+            again, _ = engine.render_source_previews(source, out, [1, 2], reuse=True)
             self.assertEqual(first, again)
 
             # An interrupted run leaves no manifest, so it cannot be reused.
@@ -969,7 +983,7 @@ class PhilonEngineTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             source = self._small_pdf(directory)
             out = Path(directory) / "out"
-            previews, _ = engine.render_source_previews(source, out, 2)
+            previews, _ = engine.render_source_previews(source, out, [1, 2])
             manifest = out / "assets" / "page-previews" / "manifest.json"
             self.assertIsNotNone(engine.verified_artifact_manifest(manifest, source, 2))
 
@@ -991,7 +1005,7 @@ class PhilonEngineTest(unittest.TestCase):
             other = Path(directory) / "other.pdf"
             other.write_bytes(source.read_bytes())
             out = Path(directory) / "out"
-            engine.render_source_previews(source, out, 2)
+            engine.render_source_previews(source, out, [1, 2])
             manifest = out / "assets" / "page-previews" / "manifest.json"
             self.assertIsNotNone(engine.verified_artifact_manifest(manifest, source, 2))
             self.assertIsNone(engine.verified_artifact_manifest(manifest, other, 2))
@@ -1332,6 +1346,464 @@ class PhilonEngineTest(unittest.TestCase):
         self.assertEqual(result["dimensions"], 2)
         self.assertEqual(result["vectors"][0]["source_block_ids"], ["p1-b1"])
         self.assertEqual(result["vectors"][1]["embedding"], [0.3, 0.4])
+
+
+class PageRotationTest(unittest.TestCase):
+    """A rotated page is measured in the frame it is displayed and reviewed in."""
+
+    @staticmethod
+    def rotated_pdf(path, rotation):
+        """One line of Helvetica at a known place, under a chosen /Rotate."""
+        content = b"BT /F1 24 Tf 72 700 Td (Rotation probe line) Tj ET\n"
+        objects = [
+            b"<< /Type /Catalog /Pages 2 0 R >>",
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            (f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Rotate {rotation} "
+             "/Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>").encode(),
+            b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+            b"<< /Length " + str(len(content)).encode() + b" >>\nstream\n" + content + b"endstream",
+        ]
+        out = bytearray(b"%PDF-1.4\n")
+        offsets = []
+        for number, body in enumerate(objects, start=1):
+            offsets.append(len(out))
+            out += f"{number} 0 obj\n".encode() + body + b"\nendobj\n"
+        start_xref = len(out)
+        out += f"xref\n0 {len(objects) + 1}\n".encode() + b"0000000000 65535 f \n"
+        for offset in offsets:
+            out += f"{offset:010d} 00000 n \n".encode()
+        out += (f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\n"
+                f"startxref\n{start_xref}\n").encode() + b"%%EOF\n"
+        Path(path).write_bytes(bytes(out))
+
+    def test_source_page_size_transposes_only_a_quarter_turn(self):
+        self.assertEqual(engine.source_page_size(612, 792, 0), (612, 792))
+        self.assertEqual(engine.source_page_size(792, 612, 90), (612, 792))
+        self.assertEqual(engine.source_page_size(612, 792, 180), (612, 792))
+        self.assertEqual(engine.source_page_size(792, 612, 270), (612, 792))
+
+    def test_a_quarter_turn_moves_a_rectangle_and_keeps_its_size(self):
+        box = engine.make_bbox(72, 700, 272, 722, "pdf-page-points")
+        turned = engine.bbox_to_displayed_frame(box, 90, 612, 792)
+        # The page is 612 wide unrotated, so it is 612 tall once displayed, and
+        # a rectangle 200 by 22 becomes 22 by 200 without changing size.
+        self.assertEqual((turned["x0"], turned["y0"]), (700, 612 - 272))
+        self.assertEqual((turned["x1"], turned["y1"]), (722, 612 - 72))
+        self.assertAlmostEqual(turned["x1"] - turned["x0"], box["y1"] - box["y0"])
+        self.assertAlmostEqual(turned["y1"] - turned["y0"], box["x1"] - box["x0"])
+
+    def test_an_unrotated_page_is_left_exactly_as_measured(self):
+        box = engine.make_bbox(72, 700, 272, 722, "pdf-page-points")
+        self.assertIs(engine.bbox_to_displayed_frame(box, 0, 612, 792), box)
+        self.assertIsNone(engine.bbox_to_displayed_frame(None, 90, 612, 792))
+
+    def test_a_half_turn_is_its_own_inverse(self):
+        box = engine.make_bbox(72, 700, 272, 722, "pdf-page-points")
+        once = engine.bbox_to_displayed_frame(box, 180, 612, 792)
+        twice = engine.bbox_to_displayed_frame(once, 180, 612, 792)
+        self.assertEqual((twice["x0"], twice["y0"], twice["x1"], twice["y1"]),
+                         (box["x0"], box["y0"], box["x1"], box["y1"]))
+
+    def test_measured_text_stays_inside_a_rotated_page(self):
+        """The defect this fixes: the rectangle fell outside the page box."""
+        with tempfile.TemporaryDirectory() as directory:
+            for rotation in (0, 90, 180, 270):
+                source = Path(directory) / f"rotate{rotation}.pdf"
+                self.rotated_pdf(source, rotation)
+                pages, _ = engine.pdfium_extract(source)
+                if not pages or pages[0].get("method") != "pdfium-native":
+                    self.skipTest("PDFium is not available for extraction")
+                page = pages[0]
+                self.assertEqual(page["rotation"], rotation)
+                measured = [line["bbox"] for line in page["native_text_lines"] if line["bbox"]]
+                self.assertTrue(measured, f"no rectangle measured at /Rotate {rotation}")
+                for box in measured:
+                    self.assertGreaterEqual(box["x0"], 0)
+                    self.assertGreaterEqual(box["y0"], 0)
+                    self.assertLessEqual(box["x1"], page["width"] + 1)
+                    self.assertLessEqual(box["y1"], page["height"] + 1)
+
+
+class RunningHeadTest(unittest.TestCase):
+    """A running head is recognised even though its page number changes."""
+
+    @staticmethod
+    def book(head_for, pages=12):
+        """Pages with enough body that only the head and folio sit in the window."""
+        def page(number):
+            body = "\n".join(f"Body line {line} of page {number + 1}, saying its own thing."
+                              for line in range(4))
+            return {"text": f"{head_for(number)}\n{body}\n{number + 1}", "number": number + 1}
+        return [page(number) for number in range(pages)]
+
+    def test_a_head_carrying_its_page_number_is_recognised(self):
+        """The defect this fixes: counted literally, it never repeated."""
+        pages = self.book(lambda number: f"Symmetries of Culture   {number + 1}")
+        artifacts = engine.repeated_page_artifacts(pages)
+        self.assertIn("symmetries of culture", artifacts)
+
+    def test_a_leading_page_number_is_set_aside_too(self):
+        pages = self.book(lambda number: f"{number + 1}   Washburn and Crowe")
+        self.assertIn("washburn and crowe", engine.repeated_page_artifacts(pages))
+
+    def test_a_head_that_changes_each_chapter_is_still_recognised(self):
+        """No one variant reaches the share threshold; each run is the evidence."""
+        pages = self.book(lambda number: f"Chapter {number // 4 + 1} Introduction {number + 1}",
+                          pages=12)
+        artifacts = engine.repeated_page_artifacts(pages)
+        self.assertIn("chapter 1 introduction", artifacts)
+        self.assertIn("chapter 3 introduction", artifacts)
+
+    def test_body_text_is_not_taken_for_a_running_head(self):
+        pages = self.book(lambda number: f"A wholly different opening for page {number + 1} here")
+        self.assertEqual(engine.repeated_page_artifacts(pages), set())
+
+    def test_a_bare_page_number_is_still_not_an_artifact(self):
+        self.assertEqual(engine.normalise_artifact("47"), "47")
+
+    def test_normalising_never_empties_a_line(self):
+        for line in ["47", "1998", "- 12 -"]:
+            self.assertTrue(engine.normalise_artifact(line))
+
+    def test_a_short_document_is_left_alone(self):
+        self.assertEqual(engine.repeated_page_artifacts(self.book(lambda n: "Head", pages=2)), set())
+
+    def test_longest_page_run_counts_only_consecutive_pages(self):
+        self.assertEqual(engine.longest_page_run([]), 0)
+        self.assertEqual(engine.longest_page_run([0, 1, 2, 3]), 4)
+        self.assertEqual(engine.longest_page_run([0, 2, 4, 6]), 1)
+        self.assertEqual(engine.longest_page_run([0, 1, 5, 6, 7]), 3)
+
+
+class SourceDeclaredLinkTest(unittest.TestCase):
+    """A PDF's own link rectangles become anchors on the text they cover."""
+
+    @staticmethod
+    def linked_pdf(path, rect, uri, rotation=0):
+        """Two well-separated lines, and one /Link rectangle over the second."""
+        content = (b"BT /F1 12 Tf 72 700 Td (Reference one) Tj ET\n"
+                   b"BT /F1 12 Tf 72 600 Td (https://example.com/paper) Tj ET\n")
+        annotation = (f"<< /Type /Annot /Subtype /Link /Rect "
+                      f"[{rect[0]} {rect[1]} {rect[2]} {rect[3]}] /Border [0 0 0] "
+                      f"/A << /S /URI /URI ({uri}) >> >>").encode()
+        objects = [
+            b"<< /Type /Catalog /Pages 2 0 R >>",
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            (f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Rotate {rotation} "
+             "/Annots [6 0 R] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>").encode(),
+            b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+            b"<< /Length " + str(len(content)).encode() + b" >>\nstream\n" + content + b"endstream",
+            annotation,
+        ]
+        out = bytearray(b"%PDF-1.4\n")
+        offsets = []
+        for number, body in enumerate(objects, start=1):
+            offsets.append(len(out))
+            out += f"{number} 0 obj\n".encode() + body + b"\nendobj\n"
+        start_xref = len(out)
+        out += f"xref\n0 {len(objects) + 1}\n".encode() + b"0000000000 65535 f \n"
+        for offset in offsets:
+            out += f"{offset:010d} 00000 n \n".encode()
+        out += (f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\n"
+                f"startxref\n{start_xref}\n").encode() + b"%%EOF\n"
+        Path(path).write_bytes(bytes(out))
+
+    def extract(self, directory, name, rect, uri, rotation=0):
+        source = Path(directory) / f"{name}.pdf"
+        self.linked_pdf(source, rect, uri, rotation)
+        pages, _ = engine.pdfium_extract(source)
+        if not pages or pages[0].get("method") != "pdfium-native":
+            self.skipTest("PDFium is not available for extraction")
+        return pages[0]
+
+    def test_only_the_covered_characters_become_the_anchor(self):
+        with tempfile.TemporaryDirectory() as directory:
+            page = self.extract(directory, "covered", (60, 590, 400, 615), "https://example.com/paper")
+            self.assertEqual([link["text"] for link in page["links"]], ["https://example.com/paper"])
+            self.assertNotIn("Reference one", page["links"][0]["text"])
+
+    def test_an_anchor_carries_no_surrounding_whitespace(self):
+        """A line break sitting inside the rectangle is not part of the link."""
+        with tempfile.TemporaryDirectory() as directory:
+            for rotation in (0, 90):
+                page = self.extract(directory, f"space{rotation}", (60, 590, 400, 615),
+                                    "https://example.com/paper", rotation)
+                self.assertEqual(page["links"][0]["text"], page["links"][0]["text"].strip())
+
+    def test_a_rectangle_over_no_text_anchors_nothing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            page = self.extract(directory, "empty", (60, 300, 400, 330), "https://example.com/none")
+            self.assertEqual(page["links"][0]["text"], "")
+            self.assertIsNone(page["links"][0]["start"])
+
+    def test_the_anchor_is_measured_in_the_displayed_frame(self):
+        with tempfile.TemporaryDirectory() as directory:
+            page = self.extract(directory, "rotated", (60, 590, 400, 615),
+                                "https://example.com/paper", 90)
+            box = page["links"][0]["bbox"]
+            self.assertLessEqual(box["x1"], page["width"] + 1)
+            self.assertLessEqual(box["y1"], page["height"] + 1)
+
+    def test_markdown_and_html_carry_the_link(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "linked.pdf"
+            self.linked_pdf(source, (60, 590, 400, 615), "https://example.com/paper")
+            ir, _, _ = engine.make_ir(source, "Balanced")
+            if not any(block["links"] for block in ir["blocks"]):
+                self.skipTest("PDFium is not available for extraction")
+            self.assertIn("[https://example.com/paper](https://example.com/paper)",
+                          engine.render_markdown(ir))
+            self.assertIn('<a href="https://example.com/paper" rel="noopener noreferrer">',
+                          engine.render_html(ir))
+
+    def test_a_script_uri_is_recorded_but_never_becomes_a_link(self):
+        """A PDF can declare any URI; the presentation export is opened locally."""
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "script.pdf"
+            self.linked_pdf(source, (60, 590, 400, 615), "javascript:alert(1)")
+            ir, _, _ = engine.make_ir(source, "Balanced")
+            if not any(block["links"] for block in ir["blocks"]):
+                self.skipTest("PDFium is not available for extraction")
+            self.assertNotIn("javascript:", engine.render_markdown(ir))
+            self.assertNotIn("javascript:", engine.render_html(ir))
+            recorded = [link["uri"] for block in ir["blocks"] for link in block["links"]]
+            self.assertIn("javascript:alert(1)", recorded)
+
+    def test_which_schemes_are_anchorable(self):
+        for uri in ["https://a.test/x", "http://a.test/x", "MailTo:someone@a.test"]:
+            self.assertTrue(engine.is_anchorable_link(uri), uri)
+        for uri in ["javascript:alert(1)", "file:///etc/passwd", "data:text/html,<b>", "", "  "]:
+            self.assertFalse(engine.is_anchorable_link(uri), uri)
+
+    def test_an_anchor_that_did_not_survive_reflow_is_left_unmade(self):
+        links = [{"uri": "https://a.test/x", "text": "words that are not here", "bbox": None}]
+        self.assertEqual(engine.anchor_links_markdown("Some other reading text.", links),
+                         "Some other reading text.")
+
+    def test_two_links_do_not_overlap_or_nest(self):
+        links = [
+            {"uri": "https://a.test/one", "text": "alpha", "bbox": None},
+            {"uri": "https://a.test/two", "text": "beta", "bbox": None},
+        ]
+        rendered = engine.anchor_links_markdown("alpha and beta", links)
+        self.assertEqual(rendered, "[alpha](https://a.test/one) and [beta](https://a.test/two)")
+
+    def test_brackets_in_the_anchor_text_are_escaped(self):
+        links = [{"uri": "https://a.test/x", "text": "[12]", "bbox": None}]
+        self.assertEqual(engine.anchor_links_markdown("See [12] for more.", links),
+                         "See [\\[12\\]](https://a.test/x) for more.")
+
+    def test_a_target_with_parentheses_is_wrapped(self):
+        links = [{"uri": "https://a.test/x_(draft)", "text": "here", "bbox": None}]
+        self.assertEqual(engine.anchor_links_markdown("look here now", links),
+                         "look [here](<https://a.test/x_(draft)>) now")
+
+    def test_html_escaping_survives_anchoring(self):
+        links = [{"uri": "https://a.test/?a=1&b=2", "text": "link", "bbox": None}]
+        reading = "a <b> & link here"
+        rendered = engine.anchor_links_html(engine.html.escape(reading), reading, links)
+        self.assertIn("&lt;b&gt; &amp; ", rendered)
+        self.assertIn('href="https://a.test/?a=1&amp;b=2"', rendered)
+        self.assertNotIn("<b>", rendered)
+
+
+class PageSelectionTest(unittest.TestCase):
+    """Converting part of a document, without it being mistaken for the whole."""
+
+    @staticmethod
+    def blank_pdf(path, page_count):
+        import pypdfium2 as pdfium
+
+        document = pdfium.PdfDocument.new()
+        for _ in range(page_count):
+            document.new_page(200, 200)
+        document.save(str(path))
+        document.close()
+
+    def test_pages_and_ranges_are_both_read(self):
+        self.assertEqual(engine.parse_page_selection("1-3,8"), (1, 2, 3, 8))
+        self.assertEqual(engine.parse_page_selection([3, 1, 3]), (1, 3))
+        self.assertEqual(engine.parse_page_selection("  2 - 4 "), (2, 3, 4))
+        self.assertEqual(engine.parse_page_selection("7"), (7,))
+
+    def test_no_selection_means_the_document_entire(self):
+        for value in [None, "", [], "   ", ","]:
+            self.assertIsNone(engine.parse_page_selection(value))
+
+    def test_a_selection_that_is_not_one_is_refused(self):
+        for value in ["0", "3-1", "abc", "1-", "-2", "1,x"]:
+            with self.assertRaises(ValueError, msg=value):
+                engine.parse_page_selection(value)
+
+    def test_a_selection_writes_back_in_its_shortest_form(self):
+        self.assertEqual(engine.compact_page_selection((1, 2, 3, 8)), "1-3,8")
+        self.assertEqual(engine.compact_page_selection((5,)), "5")
+        self.assertEqual(engine.compact_page_selection((1, 3, 5)), "1,3,5")
+        self.assertEqual(engine.compact_page_selection(()), "")
+
+    def test_a_page_the_document_does_not_have_is_refused(self):
+        with self.assertRaises(ValueError) as refusal:
+            engine.validate_page_selection((1, 40), 12)
+        self.assertIn("12 pages", str(refusal.exception))
+        engine.validate_page_selection((1, 12), 12)
+        engine.validate_page_selection(None, 12)
+
+    def test_part_of_a_document_never_shares_a_cache_entry_with_the_whole(self):
+        """A ten-page conversion served for a whole book would be silent data loss."""
+        cache = Path("/cache")
+        whole = engine.cache_path(cache, "abc123", "Balanced")
+        part = engine.cache_path(cache, "abc123", "Balanced", (1, 2))
+        other = engine.cache_path(cache, "abc123", "Balanced", (1, 3))
+        self.assertEqual(len({whole, part, other}), 3)
+
+    def test_a_long_selection_still_names_a_bounded_file(self):
+        long_selection = tuple(range(1, 400, 2))
+        token = engine.page_selection_token(long_selection)
+        self.assertLess(len(token), 40)
+        self.assertEqual(token, engine.page_selection_token(long_selection))
+        self.assertNotEqual(token, engine.page_selection_token(tuple(range(1, 400, 3))))
+        self.assertEqual(engine.page_selection_token(None), "")
+
+    def test_only_the_selected_pages_are_extracted_and_keep_their_numbers(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "four.pdf"
+            try:
+                self.blank_pdf(source, 4)
+            except ImportError:
+                self.skipTest("PDFium is not available")
+            selected, _ = engine.pdfium_extract(source, (2, 4))
+            self.assertEqual([page["number"] for page in selected], [2, 4])
+            whole, _ = engine.pdfium_extract(source)
+            self.assertEqual([page["number"] for page in whole], [1, 2, 3, 4])
+
+    def test_a_partial_export_is_named_and_previewed_by_real_page_number(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "four.pdf"
+            try:
+                self.blank_pdf(source, 4)
+            except ImportError:
+                self.skipTest("PDFium is not available")
+            result = engine.convert_file(source, "Balanced", root / "exports", root / "cache",
+                                         cache_policy="bypass", selection=(2, 3))
+            self.assertEqual(result["page_selection"], "2-3")
+            previews = [Path(item).name for item in result["outputs"].get("assets", [])]
+            self.assertEqual(previews, ["page-0002.png", "page-0003.png"])
+            exports = list((root / "exports").iterdir())
+            self.assertTrue(any("pages-2-3" in item.name for item in exports), exports)
+
+    def test_a_partial_export_never_overwrites_the_whole_one(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "four.pdf"
+            try:
+                self.blank_pdf(source, 4)
+            except ImportError:
+                self.skipTest("PDFium is not available")
+            engine.convert_file(source, "Balanced", root / "exports", root / "cache",
+                                cache_policy="bypass")
+            engine.convert_file(source, "Balanced", root / "exports", root / "cache",
+                                cache_policy="bypass", selection=(2,))
+            self.assertEqual(len(list((root / "exports").iterdir())), 2)
+
+    def test_a_selection_beyond_the_document_fails_before_extraction(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "four.pdf"
+            try:
+                self.blank_pdf(source, 4)
+            except ImportError:
+                self.skipTest("PDFium is not available")
+            with self.assertRaises(ValueError):
+                engine.convert_file(source, "Balanced", root / "exports", root / "cache",
+                                    cache_policy="bypass", selection=(9,))
+
+
+class IrVersionTest(unittest.TestCase):
+    """The evidence shape is named, and an older one cannot refuse a document."""
+
+    @staticmethod
+    def blank_pdf(path, page_count=1):
+        import pypdfium2 as pdfium
+
+        document = pdfium.PdfDocument.new()
+        for _ in range(page_count):
+            document.new_page(200, 200)
+        document.save(str(path))
+        document.close()
+
+    def test_the_ir_records_the_version_it_was_written_against(self):
+        self.assertEqual(engine.IR_VERSION, "0.3.0")
+
+    def test_an_ir_from_another_version_is_not_accepted(self):
+        ir = {"philon_ir_version": "0.2.0", "pages": [], "blocks": []}
+        with self.assertRaises(ValueError):
+            engine.validate_ir(ir)
+
+    def test_the_cache_entry_is_named_after_the_shape_it_holds(self):
+        entry = engine.cache_path(Path("/cache"), "abc123", "Balanced")
+        self.assertIn(engine.safe_slug(engine.IR_VERSION), entry.name)
+
+    def test_an_entry_written_against_an_older_shape_is_never_reached(self):
+        older = "0.2.0"
+        self.assertNotEqual(
+            engine.cache_path(Path("/cache"), "abc123", "Balanced").name,
+            engine.cache_path(Path("/cache"), "abc123", "Balanced").name.replace(
+                engine.safe_slug(engine.IR_VERSION), engine.safe_slug(older)),
+        )
+
+    def test_an_unreadable_entry_is_recomputed_rather_than_refused(self):
+        """Reuse is an optimisation; a broken one must not refuse a document."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "one.pdf"
+            try:
+                self.blank_pdf(source)
+            except ImportError:
+                self.skipTest("PDFium is not available")
+            cache = root / "cache"
+            cache.mkdir()
+            content_hash = engine.sha256_file(source)
+            entry = engine.cache_path(cache, content_hash, "Balanced")
+            entry.write_text('{"ir": {"philon_ir_version": "0.2.0", "pages": [], "blocks": []},'
+                             ' "warnings": [], "timings": []}', encoding="utf-8")
+
+            result = engine.convert_file(source, "Balanced", root / "exports", cache)
+
+            self.assertFalse(result["cache_hit"])
+            self.assertIn(result["status"], {"completed", "completed_with_warnings"})
+
+    def test_a_corrupt_entry_is_recomputed_too(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "one.pdf"
+            try:
+                self.blank_pdf(source)
+            except ImportError:
+                self.skipTest("PDFium is not available")
+            cache = root / "cache"
+            cache.mkdir()
+            entry = engine.cache_path(cache, engine.sha256_file(source), "Balanced")
+            entry.write_text("{ this is not json", encoding="utf-8")
+
+            result = engine.convert_file(source, "Balanced", root / "exports", cache)
+
+            self.assertFalse(result["cache_hit"])
+
+    def test_a_sound_entry_is_still_reused(self):
+        """The control: recomputing must not become the only path."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "one.pdf"
+            try:
+                self.blank_pdf(source)
+            except ImportError:
+                self.skipTest("PDFium is not available")
+            cache = root / "cache"
+            first = engine.convert_file(source, "Balanced", root / "exports", cache)
+            second = engine.convert_file(source, "Balanced", root / "exports", cache)
+            self.assertFalse(first["cache_hit"])
+            self.assertTrue(second["cache_hit"])
 
 
 if __name__ == "__main__":

@@ -29,6 +29,7 @@ swiftc -O -framework Vision -framework AppKit engine/vision_ocr.swift -o engine/
   --osx-bundle-identifier com.tsevis.philon-python \
   --add-data "engine/model-manifest.json:engine" \
   --add-data "engine/dist/philon-vision-ocr:engine/dist" \
+  --add-data "philon_desktop/assets:philon_desktop/assets" \
   --exclude-module PyQt6 \
   --collect-all pypdfium2 --collect-all pypdf --collect-all PIL \
   philon_launcher.py
