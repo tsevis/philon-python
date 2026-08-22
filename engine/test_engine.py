@@ -1475,5 +1475,137 @@ class RunningHeadTest(unittest.TestCase):
         self.assertEqual(engine.longest_page_run([0, 1, 5, 6, 7]), 3)
 
 
+class SourceDeclaredLinkTest(unittest.TestCase):
+    """A PDF's own link rectangles become anchors on the text they cover."""
+
+    @staticmethod
+    def linked_pdf(path, rect, uri, rotation=0):
+        """Two well-separated lines, and one /Link rectangle over the second."""
+        content = (b"BT /F1 12 Tf 72 700 Td (Reference one) Tj ET\n"
+                   b"BT /F1 12 Tf 72 600 Td (https://example.com/paper) Tj ET\n")
+        annotation = (f"<< /Type /Annot /Subtype /Link /Rect "
+                      f"[{rect[0]} {rect[1]} {rect[2]} {rect[3]}] /Border [0 0 0] "
+                      f"/A << /S /URI /URI ({uri}) >> >>").encode()
+        objects = [
+            b"<< /Type /Catalog /Pages 2 0 R >>",
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            (f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Rotate {rotation} "
+             "/Annots [6 0 R] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>").encode(),
+            b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+            b"<< /Length " + str(len(content)).encode() + b" >>\nstream\n" + content + b"endstream",
+            annotation,
+        ]
+        out = bytearray(b"%PDF-1.4\n")
+        offsets = []
+        for number, body in enumerate(objects, start=1):
+            offsets.append(len(out))
+            out += f"{number} 0 obj\n".encode() + body + b"\nendobj\n"
+        start_xref = len(out)
+        out += f"xref\n0 {len(objects) + 1}\n".encode() + b"0000000000 65535 f \n"
+        for offset in offsets:
+            out += f"{offset:010d} 00000 n \n".encode()
+        out += (f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\n"
+                f"startxref\n{start_xref}\n").encode() + b"%%EOF\n"
+        Path(path).write_bytes(bytes(out))
+
+    def extract(self, directory, name, rect, uri, rotation=0):
+        source = Path(directory) / f"{name}.pdf"
+        self.linked_pdf(source, rect, uri, rotation)
+        pages, _ = engine.pdfium_extract(source)
+        if not pages or pages[0].get("method") != "pdfium-native":
+            self.skipTest("PDFium is not available for extraction")
+        return pages[0]
+
+    def test_only_the_covered_characters_become_the_anchor(self):
+        with tempfile.TemporaryDirectory() as directory:
+            page = self.extract(directory, "covered", (60, 590, 400, 615), "https://example.com/paper")
+            self.assertEqual([link["text"] for link in page["links"]], ["https://example.com/paper"])
+            self.assertNotIn("Reference one", page["links"][0]["text"])
+
+    def test_an_anchor_carries_no_surrounding_whitespace(self):
+        """A line break sitting inside the rectangle is not part of the link."""
+        with tempfile.TemporaryDirectory() as directory:
+            for rotation in (0, 90):
+                page = self.extract(directory, f"space{rotation}", (60, 590, 400, 615),
+                                    "https://example.com/paper", rotation)
+                self.assertEqual(page["links"][0]["text"], page["links"][0]["text"].strip())
+
+    def test_a_rectangle_over_no_text_anchors_nothing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            page = self.extract(directory, "empty", (60, 300, 400, 330), "https://example.com/none")
+            self.assertEqual(page["links"][0]["text"], "")
+            self.assertIsNone(page["links"][0]["start"])
+
+    def test_the_anchor_is_measured_in_the_displayed_frame(self):
+        with tempfile.TemporaryDirectory() as directory:
+            page = self.extract(directory, "rotated", (60, 590, 400, 615),
+                                "https://example.com/paper", 90)
+            box = page["links"][0]["bbox"]
+            self.assertLessEqual(box["x1"], page["width"] + 1)
+            self.assertLessEqual(box["y1"], page["height"] + 1)
+
+    def test_markdown_and_html_carry_the_link(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "linked.pdf"
+            self.linked_pdf(source, (60, 590, 400, 615), "https://example.com/paper")
+            ir, _, _ = engine.make_ir(source, "Balanced")
+            if not any(block["links"] for block in ir["blocks"]):
+                self.skipTest("PDFium is not available for extraction")
+            self.assertIn("[https://example.com/paper](https://example.com/paper)",
+                          engine.render_markdown(ir))
+            self.assertIn('<a href="https://example.com/paper" rel="noopener noreferrer">',
+                          engine.render_html(ir))
+
+    def test_a_script_uri_is_recorded_but_never_becomes_a_link(self):
+        """A PDF can declare any URI; the presentation export is opened locally."""
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "script.pdf"
+            self.linked_pdf(source, (60, 590, 400, 615), "javascript:alert(1)")
+            ir, _, _ = engine.make_ir(source, "Balanced")
+            if not any(block["links"] for block in ir["blocks"]):
+                self.skipTest("PDFium is not available for extraction")
+            self.assertNotIn("javascript:", engine.render_markdown(ir))
+            self.assertNotIn("javascript:", engine.render_html(ir))
+            recorded = [link["uri"] for block in ir["blocks"] for link in block["links"]]
+            self.assertIn("javascript:alert(1)", recorded)
+
+    def test_which_schemes_are_anchorable(self):
+        for uri in ["https://a.test/x", "http://a.test/x", "MailTo:someone@a.test"]:
+            self.assertTrue(engine.is_anchorable_link(uri), uri)
+        for uri in ["javascript:alert(1)", "file:///etc/passwd", "data:text/html,<b>", "", "  "]:
+            self.assertFalse(engine.is_anchorable_link(uri), uri)
+
+    def test_an_anchor_that_did_not_survive_reflow_is_left_unmade(self):
+        links = [{"uri": "https://a.test/x", "text": "words that are not here", "bbox": None}]
+        self.assertEqual(engine.anchor_links_markdown("Some other reading text.", links),
+                         "Some other reading text.")
+
+    def test_two_links_do_not_overlap_or_nest(self):
+        links = [
+            {"uri": "https://a.test/one", "text": "alpha", "bbox": None},
+            {"uri": "https://a.test/two", "text": "beta", "bbox": None},
+        ]
+        rendered = engine.anchor_links_markdown("alpha and beta", links)
+        self.assertEqual(rendered, "[alpha](https://a.test/one) and [beta](https://a.test/two)")
+
+    def test_brackets_in_the_anchor_text_are_escaped(self):
+        links = [{"uri": "https://a.test/x", "text": "[12]", "bbox": None}]
+        self.assertEqual(engine.anchor_links_markdown("See [12] for more.", links),
+                         "See [\\[12\\]](https://a.test/x) for more.")
+
+    def test_a_target_with_parentheses_is_wrapped(self):
+        links = [{"uri": "https://a.test/x_(draft)", "text": "here", "bbox": None}]
+        self.assertEqual(engine.anchor_links_markdown("look here now", links),
+                         "look [here](<https://a.test/x_(draft)>) now")
+
+    def test_html_escaping_survives_anchoring(self):
+        links = [{"uri": "https://a.test/?a=1&b=2", "text": "link", "bbox": None}]
+        reading = "a <b> & link here"
+        rendered = engine.anchor_links_html(engine.html.escape(reading), reading, links)
+        self.assertIn("&lt;b&gt; &amp; ", rendered)
+        self.assertIn('href="https://a.test/?a=1&amp;b=2"', rendered)
+        self.assertNotIn("<b>", rendered)
+
+
 if __name__ == "__main__":
     unittest.main()

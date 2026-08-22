@@ -809,6 +809,169 @@ def bbox_to_displayed_frame(box: dict[str, Any] | None, rotation: int, source_wi
     )
 
 
+#: Schemes Philon will turn into a link. A PDF may declare any URI in an
+#: annotation, `javascript:` included, and the presentation export is a document
+#: someone opens locally. Anything outside this set stays recorded as page
+#: evidence and never becomes something to click.
+ANCHORABLE_LINK_SCHEMES = ("http://", "https://", "mailto:")
+
+
+def is_anchorable_link(uri: str) -> bool:
+    return str(uri).strip().lower().startswith(ANCHORABLE_LINK_SCHEMES)
+
+
+def rect_contains_point(rect: tuple[float, float, float, float], x: float, y: float) -> bool:
+    left, bottom, right, top = rect
+    return left <= x <= right and bottom <= y <= top
+
+
+def measure_link_anchors(textpage: Any, extracted_text: str, leading_trim: int, text: str,
+                         annotations: list[dict[str, Any]], rotation: int,
+                         source_width: float, source_height: float) -> list[dict[str, Any]]:
+    """Find the characters a PDF's own link rectangle is drawn over.
+
+    The rectangle and its target are source-declared; which characters sit
+    inside it is measured, one character box at a time, in the page's own
+    unrotated frame where both are expressed. A rectangle covering no text is
+    reported without an anchor rather than attached to whatever was nearest,
+    because a link on the wrong words is worse than a link left unmade.
+    """
+    if not annotations:
+        return []
+    try:
+        character_count = textpage.count_chars()
+        boxes = [textpage.get_charbox(index) for index in range(character_count)]
+    except Exception:
+        return []
+    anchors: list[dict[str, Any]] = []
+    for annotation in annotations:
+        rect = annotation.get("rect")
+        if not rect:
+            continue
+        # Whitespace is never part of a link. A line break sitting just inside
+        # the rectangle would otherwise be carried into the anchor, which the
+        # machine outputs record verbatim.
+        covered = [
+            index for index, box in enumerate(boxes)
+            if box and not extracted_text[index : index + 1].isspace()
+            and rect_contains_point(rect, (box[0] + box[2]) / 2, (box[1] + box[3]) / 2)
+        ]
+        if not covered:
+            anchors.append({"uri": annotation["uri"], "start": None, "end": None, "text": "", "bbox": None})
+            continue
+        start = min(covered) - leading_trim
+        end = max(covered) + 1 - leading_trim
+        if start < 0 or end > len(text) or end <= start:
+            anchors.append({"uri": annotation["uri"], "start": None, "end": None, "text": "", "bbox": None})
+            continue
+        measured = union_bboxes(
+            make_bbox(boxes[index][0], boxes[index][1], boxes[index][2], boxes[index][3], "pdf-page-points")
+            for index in covered
+        )
+        anchors.append({
+            "uri": annotation["uri"],
+            "start": start,
+            "end": end,
+            "text": text[start:end],
+            "bbox": bbox_to_displayed_frame(measured, rotation, source_width, source_height),
+        })
+    return anchors
+
+
+def pdf_link_annotations(path: Path, page_count: int) -> list[list[dict[str, Any]]]:
+    """Read each page's declared link rectangles, in the page's own frame."""
+    per_page: list[list[dict[str, Any]]] = [[] for _ in range(page_count)]
+    try:
+        from pypdf import PdfReader  # type: ignore
+
+        reader = PdfReader(str(path), strict=False)
+        for index, page in enumerate(reader.pages[:page_count]):
+            found: list[dict[str, Any]] = []
+            for annotation in page.get("/Annots") or []:
+                item = annotation.get_object() if hasattr(annotation, "get_object") else annotation
+                if not hasattr(item, "get") or item.get("/Subtype") != "/Link":
+                    continue
+                action = item.get("/A") or {}
+                if hasattr(action, "get_object"):
+                    action = action.get_object()
+                uri = action.get("/URI") if hasattr(action, "get") else None
+                rectangle = item.get("/Rect")
+                if not uri or not rectangle or len(rectangle) != 4:
+                    continue
+                left, bottom, right, top = (float(value) for value in rectangle)
+                found.append({
+                    "uri": str(uri),
+                    "rect": (min(left, right), min(bottom, top), max(left, right), max(bottom, top)),
+                })
+            per_page[index] = found
+    except Exception:
+        pass
+    return per_page
+
+
+def block_links(page: dict[str, Any], start: int | None, end: int | None) -> list[dict[str, Any]]:
+    """The measured anchors that fall inside one block's span of page text."""
+    if start is None or end is None:
+        return []
+    return [
+        {"uri": link["uri"], "text": link["text"], "bbox": link["bbox"]}
+        for link in page.get("links", [])
+        if link.get("start") is not None and start <= link["start"] and link["end"] <= end
+    ]
+
+
+def anchored_spans(reading_text: str, links: list[dict[str, Any]]) -> list[tuple[int, int, str]]:
+    """Where each anchor still appears verbatim, without overlaps.
+
+    `clean_reading_text` reflows the source lines, so an anchor is placed only
+    where its measured text survived that reflow intact. Anything else would
+    move a link onto words it was never drawn over, so it is left unmade.
+    """
+    placed: list[tuple[int, int, str]] = []
+    for link in links:
+        if not is_anchorable_link(link.get("uri", "")):
+            continue
+        anchor = re.sub(r"\s+", " ", str(link.get("text", ""))).strip()
+        if not anchor:
+            continue
+        position = reading_text.find(anchor)
+        while position != -1:
+            span = (position, position + len(anchor))
+            if all(span[1] <= begin or span[0] >= finish for begin, finish, _ in placed):
+                placed.append((span[0], span[1], str(link["uri"])))
+                break
+            position = reading_text.find(anchor, position + 1)
+    return sorted(placed, reverse=True)
+
+
+def anchor_links_markdown(reading_text: str, links: list[dict[str, Any]]) -> str:
+    """Turn measured anchors into Markdown links, right to left so offsets hold."""
+    for begin, finish, uri in anchored_spans(reading_text, links):
+        label = reading_text[begin:finish].replace("\\", "\\\\").replace("[", "\\[").replace("]", "\\]")
+        target = f"<{uri}>" if re.search(r"[\s()<>]", uri) else uri
+        reading_text = reading_text[:begin] + f"[{label}]({target})" + reading_text[finish:]
+    return reading_text
+
+
+def anchor_links_html(escaped_text: str, reading_text: str, links: list[dict[str, Any]]) -> str:
+    """Turn measured anchors into HTML links in already-escaped text.
+
+    The spans are found in the unescaped reading text and re-escaped piecewise,
+    so an escape sequence can never be split down the middle.
+    """
+    spans = anchored_spans(reading_text, links)
+    if not spans:
+        return escaped_text
+    result = reading_text
+    for begin, finish, uri in spans:
+        label = html.escape(result[begin:finish])
+        target = html.escape(uri, quote=True)
+        result = result[:begin] + f'<a href="{target}" rel="noopener noreferrer">{label}</a>' + result[finish:]
+    # Escape everything that is not one of the anchors just inserted.
+    parts = re.split(r"(<a href=\"[^\"]*\" rel=\"noopener noreferrer\">.*?</a>)", result, flags=re.DOTALL)
+    return "".join(part if part.startswith("<a href=") else html.escape(part) for part in parts)
+
+
 def language_hint(text: str) -> str:
     if not text.strip():
         return "und"
@@ -992,6 +1155,7 @@ def pdfium_extract(path: Path) -> tuple[list[dict[str, Any]], list[WarningRecord
         import pypdfium2 as pdfium  # type: ignore
 
         document = pdfium.PdfDocument(str(path))
+        link_annotations = pdf_link_annotations(path, len(document))
         pages: list[dict[str, Any]] = []
         for index in range(len(document)):
             page = document[index]
@@ -1028,6 +1192,11 @@ def pdfium_extract(path: Path) -> tuple[list[dict[str, Any]], list[WarningRecord
             pages.append({
                 "number": index + 1, "width": width, "height": height, "text": text,
                 "rotation": rotation,
+                "links": measure_link_anchors(
+                    textpage, extracted_text, leading_trim, text,
+                    link_annotations[index] if index < len(link_annotations) else [],
+                    rotation, source_width, source_height,
+                ),
                 "method": "pdfium-native", "native_text_spans": spans, "native_text_lines": line_spans,
             })
             textpage.close()
@@ -1413,6 +1582,7 @@ def make_block(page: dict[str, Any], ordinal: int, text: str, start: int | None 
     block_id = f"{page_id}-block-{ordinal}"
     confidence = page.get("ocr_confidence", health["confidence"])
     bbox = source_bbox_for_block(page, text, start, end, ocr_line_indexes)
+    links = block_links(page, start, end)
     return {
         "id": block_id,
         "page": page_id,
@@ -1420,6 +1590,7 @@ def make_block(page: dict[str, Any], ordinal: int, text: str, start: int | None 
         "level": level,
         "text": text,
         "bbox": bbox,
+        "links": links,
         "source": {"method": page["method"], "confidence": confidence, "language": language_hint(text)},
         "evidence": {
             "native_health": health,
@@ -1428,6 +1599,8 @@ def make_block(page: dict[str, Any], ordinal: int, text: str, start: int | None 
                 "native_text_present": health["native_text_present"],
                 "replacement_characters": health["replacement_characters"],
                 "source_bbox_available": bbox is not None,
+                "source_declared_link_count": len(links),
+                "unanchorable_link_count": sum(1 for link in links if not is_anchorable_link(link["uri"])),
                 "source_bbox_coordinate_space": bbox["coordinate_space"] if bbox else None,
                 "ocr_line_count": len(ocr_line_indexes) if ocr_line_indexes is not None else len(page.get("ocr_lines", [])),
             },
@@ -1843,6 +2016,7 @@ def render_markdown(ir: dict[str, Any]) -> str:
         text = clean_reading_text(str(block.get("text", "")))
         if not text:
             continue
+        text = anchor_links_markdown(text, block.get("links", []))
         if block["type"] == "heading":
             lines.extend(["#" * (block["level"] or 2) + " " + text, ""])
         elif block["type"] == "table" and table_rows(block["text"]):
@@ -1893,7 +2067,8 @@ def render_html(ir: dict[str, Any], include_facsimiles: bool = False) -> str:
         for block in blocks_by_page.get(page_id, []):
             source = block["source"]
             attrs = f'data-philon-id="{block["id"]}" data-philon-page="{block["page"]}" data-philon-confidence="{source["confidence"]}"'
-            content = html.escape(clean_reading_text(str(block.get("text", ""))))
+            reading = clean_reading_text(str(block.get("text", "")))
+            content = anchor_links_html(html.escape(reading), reading, block.get("links", []))
             if not content:
                 continue
             if block["type"] == "heading":
