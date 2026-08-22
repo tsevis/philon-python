@@ -21,8 +21,8 @@ from typing import Any, Callable, Iterable
 from engine import philon_engine as engine
 
 PROFILES = ("Fast", "Balanced", "Verified")
-OUTPUTS = ("machine", "markdown", "html", "ir", "chunks", "evidence", "table_csv", "assets", "manifest", "marker_json")
-DEFAULT_OUTPUTS = tuple(output for output in OUTPUTS if output != "marker_json")
+OUTPUTS = ("machine", "markdown", "html", "ir", "chunks", "evidence", "table_csv", "assets", "manifest", "page_tree")
+DEFAULT_OUTPUTS = tuple(output for output in OUTPUTS if output != "page_tree")
 TERMINAL_STATES = {"completed", "completed_with_warnings", "failed", "cancelled"}
 
 

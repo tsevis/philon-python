@@ -508,7 +508,7 @@ class PhilonEngineTest(unittest.TestCase):
             self.assertEqual(exported_ir["document_artifacts"]["native_images"][0]["relative_path"], Path(asset["path"]).relative_to(output).as_posix())
             self.assertEqual(exported_ir["document_artifacts"]["native_images"][0]["source_pages"], [1])
 
-    def test_marker_style_json_has_page_tree_source_polygons_and_embedded_native_images(self):
+    def test_page_tree_json_has_source_polygons_and_embedded_native_images(self):
         from PIL import Image
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -523,7 +523,7 @@ class PhilonEngineTest(unittest.TestCase):
                 "document_artifacts": {},
             }
             engine.attach_native_pdf_assets_to_ir(ir, extracted, output)
-            pages = engine.render_marker_style_json(ir, output)
+            pages = engine.render_page_tree_json(ir, output)
             self.assertEqual(pages[0]["block_type"], "Page")
             self.assertEqual(pages[0]["children"][0]["block_type"], "SectionHeader")
             self.assertEqual(pages[0]["children"][0]["polygon"], [[10.0, 20.0], [90.0, 20.0], [90.0, 60.0], [10.0, 60.0]])
@@ -538,7 +538,7 @@ class PhilonEngineTest(unittest.TestCase):
             Image.new("RGB", (80, 60), "green").save(source, "PDF")
             result = engine.convert_file(source, "Balanced", root / "exports", root / "cache", cache_policy="bypass")
             self.assertIn("machine", result["outputs"])
-            self.assertFalse("marker_json" in result["outputs"])
+            self.assertFalse("page_tree" in result["outputs"])
             self.assertTrue((Path(result["outputs"]["machine"]) / "blocks.ndjson").is_file())
             first_asset = result["outputs"]["extracted_assets"]["items"][0]
             self.assertEqual(Path(first_asset["path"]).parent.name, "images")

@@ -2249,11 +2249,11 @@ def write_machine_package(ir: dict[str, Any], output_dir: Path) -> Path:
         atomic_write_text(pages_dir / f"page-{number:04}.md", "\n".join(page_markdown).strip() + "\n")
     atomic_write_text(root / "README.md", "# Philon machine package\n\nUse `blocks.ndjson` for streaming ingestion, `reading-order.json` for document order, `pages/` for page-level records, and `assets.json` for source-image provenance. `text` is source-retained; `reading_text` is the safe reflowed form.\n")
     return root
-def marker_style_block_type(block: dict[str, Any]) -> str:
+def page_tree_block_type(block: dict[str, Any]) -> str:
     """Map Philon's stable block taxonomy to the familiar page-tree names.
 
     This is a clean-room export adapter. It intentionally shares the useful
-    page/children/images shape that downstream Marker-oriented tools expect,
+    page/children/images shape that downstream page-tree consumers expect,
     while keeping Philon's provenance in separate, explicit fields.
     """
     return {
@@ -2262,7 +2262,7 @@ def marker_style_block_type(block: dict[str, Any]) -> str:
     }.get(block.get("type"), "Text")
 
 
-def marker_style_polygon(block: dict[str, Any], page: dict[str, Any]) -> list[list[float]] | None:
+def page_tree_polygon(block: dict[str, Any], page: dict[str, Any]) -> list[list[float]] | None:
     bbox = block.get("bbox")
     if not isinstance(bbox, dict):
         return None
@@ -2285,7 +2285,7 @@ def marker_style_polygon(block: dict[str, Any], page: dict[str, Any]) -> list[li
     return [[x0, y0], [x1, y0], [x1, y1], [x0, y1]]
 
 
-def marker_style_html(block: dict[str, Any]) -> str:
+def page_tree_html(block: dict[str, Any]) -> str:
     content = html.escape(str(block.get("text", ""))).replace("\n", "<br />")
     block_type = block.get("type")
     if block_type == "heading":
@@ -2303,8 +2303,8 @@ def marker_style_html(block: dict[str, Any]) -> str:
     return f"<p>{content}</p>"
 
 
-def render_marker_style_json(ir: dict[str, Any], output_dir: Path) -> list[dict[str, Any]]:
-    """Render a portable, Marker-shaped page tree with embedded images.
+def render_page_tree_json(ir: dict[str, Any], output_dir: Path) -> list[dict[str, Any]]:
+    """Render a portable page-tree JSON with embedded images.
 
     Every page has `id`, `block_type`, `html`, `polygon`, and `children`.
     Leaves retain source polygons and section hierarchy. Native image bytes are
@@ -2329,7 +2329,7 @@ def render_marker_style_json(ir: dict[str, Any], output_dir: Path) -> list[dict[
         children: list[dict[str, Any]] = []
         references: list[str] = []
         for index, block in enumerate(blocks_by_page.get(page_id, [])):
-            node_type = marker_style_block_type(block)
+            node_type = page_tree_block_type(block)
             node_id = f"/page/{page_number}/{node_type}/{index}"
             if block.get("type") == "heading":
                 level = int(block.get("level") or 2)
@@ -2338,8 +2338,8 @@ def render_marker_style_json(ir: dict[str, Any], output_dir: Path) -> list[dict[
             children.append({
                 "id": node_id,
                 "block_type": node_type,
-                "html": marker_style_html(block),
-                "polygon": marker_style_polygon(block, page),
+                "html": page_tree_html(block),
+                "polygon": page_tree_polygon(block, page),
                 "children": None,
                 "section_hierarchy": dict(section_hierarchy),
                 "images": {},
@@ -2786,7 +2786,7 @@ def write_outputs(ir: dict[str, Any], warnings: list[WarningRecord], timings: li
         "markdown": output_dir / f"{base}.md",
         "html": output_dir / f"{base}.html",
         "ir": output_dir / f"{base}.philon.json",
-        "marker_json": output_dir / f"{base}.marker.json",
+        "page_tree": output_dir / f"{base}.page-tree.json",
         "chunks": output_dir / f"{base}.chunks.json",
         "embeddings": output_dir / f"{base}.embeddings.json",
         "evidence": output_dir / f"{base}.evidence.json",
@@ -2797,8 +2797,8 @@ def write_outputs(ir: dict[str, Any], warnings: list[WarningRecord], timings: li
         atomic_write_text(paths["html"], render_html(ir, include_facsimiles=(output_dir / "assets" / "page-previews").exists()))
     if "ir" in selected:
         atomic_write_text(paths["ir"], json.dumps(ir, indent=2, ensure_ascii=False))
-    if "marker_json" in selected:
-        atomic_write_text(paths["marker_json"], json.dumps(render_marker_style_json(ir, output_dir), indent=2, ensure_ascii=False))
+    if "page_tree" in selected:
+        atomic_write_text(paths["page_tree"], json.dumps(render_page_tree_json(ir, output_dir), indent=2, ensure_ascii=False))
     machine_root: Path | None = None
     if "machine" in selected:
         machine_root = write_machine_package(ir, output_dir)

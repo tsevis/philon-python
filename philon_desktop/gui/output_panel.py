@@ -222,11 +222,11 @@ class OutputPanel(QFrame):
         footer = hbox(spacing=8)
         self.footer_note = theme.label("Outputs include Markdown, HTML, IR, chunks, and evidence", size=11, color=t["text_tertiary"])
         footer.addWidget(self.footer_note, 1)
-        self.marker_link = make_button("Marker JSON", "ExportLink", font_size=11, font_weight=600)
-        self.marker_link.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.marker_link.clicked.connect(self._open_marker_json)
-        self.marker_link.hide()
-        footer.addWidget(self.marker_link)
+        self.page_tree_link = make_button("Page tree JSON", "ExportLink", font_size=11, font_weight=600)
+        self.page_tree_link.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.page_tree_link.clicked.connect(self._open_page_tree_json)
+        self.page_tree_link.hide()
+        footer.addWidget(self.page_tree_link)
         self.copy_button = make_button("Copy Markdown", "CopyButton", "ClipboardText", 16, t["accent_text"], font_size=11, font_weight=650)
         self.copy_button.clicked.connect(self._copy_body)
         self.copy_button.hide()
@@ -264,12 +264,12 @@ class OutputPanel(QFrame):
         self.footer_note.setText(f"{blocks} evidence-linked blocks" if self.document else "Outputs include Markdown, HTML, IR, chunks, and evidence")
         self.copy_button.setVisible(bool(self.document))
         self.copy_button.setText(" Copy " + ("Markdown" if self.format == "Preview" else self.format))
-        self.marker_link.setVisible(bool(self.document and self.document.get("outputs", {}).get("marker_json")))
+        self.page_tree_link.setVisible(bool(self.document and self.document.get("outputs", {}).get("page_tree")))
 
     def _copy_body(self) -> None:
         QApplication.clipboard().setText(self._body())
 
-    def _open_marker_json(self) -> None:
-        path = (self.document or {}).get("outputs", {}).get("marker_json")
+    def _open_page_tree_json(self) -> None:
+        path = (self.document or {}).get("outputs", {}).get("page_tree")
         if path:
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))

@@ -13,7 +13,7 @@
       "id": "born-digital-paper",
       "path": "/absolute/path/to/paper.pdf",
       "cohort": "clean-born-digital",
-      "expected": { "min_pages": 1, "max_warnings": 0, "gold_markdown_path": "/absolute/path/to/gold/born-digital-paper.md", "required_outputs": ["markdown", "html", "ir", "marker_json", "chunks", "evidence", "manifest"] }
+      "expected": { "min_pages": 1, "max_warnings": 0, "gold_markdown_path": "/absolute/path/to/gold/born-digital-paper.md", "required_outputs": ["markdown", "html", "ir", "page_tree", "chunks", "evidence", "manifest"] }
     },
     {
       "id": "scanned-table-paper",

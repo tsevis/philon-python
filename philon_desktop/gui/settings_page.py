@@ -16,7 +16,7 @@ OUTPUT_LABELS = {
     "markdown": "Clean reading Markdown",
     "html": "Presentation HTML",
     "ir": "Philon IR",
-    "marker_json": "Marker JSON (compatibility)",
+    "page_tree": "Page tree JSON (interchange)",
     "chunks": "RAG chunks",
     "evidence": "Evidence report",
     "table_csv": "Table CSV",
