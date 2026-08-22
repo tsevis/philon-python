@@ -280,8 +280,20 @@ def paragraphs(text: str) -> list[str]:
 
 
 def normalise_artifact(value: str) -> str:
-    """Normalise likely running headers/footers without changing source text."""
-    return re.sub(r"\s+", " ", value).strip().casefold()
+    """Normalise likely running headers/footers without changing source text.
+
+    The page number a running head carries is set aside before counting. A head
+    printed as "Symmetries of Culture   47" is a different string on every page
+    it appears on, so counted literally it never repeats, never reaches the
+    threshold below, and is emitted as body text on every page of the book.
+    Only leading or trailing numbering is set aside, never a digit inside the
+    words, and only for the comparison: the source line itself is untouched and
+    is what any retained artifact still records.
+    """
+    collapsed = re.sub(r"\s+", " ", value).strip()
+    without_number = re.sub(r"^[\[(]?\d{1,4}[\])]?\s*[.\u00b7:|\u2014\u2013-]?\s+", "", collapsed)
+    without_number = re.sub(r"\s+[.\u00b7:|\u2014\u2013-]?\s*[\[(]?\d{1,4}[\])]?$", "", without_number)
+    return (without_number or collapsed).casefold()
 
 
 def is_numeric_source_marker(value: str) -> bool:
@@ -295,6 +307,25 @@ def is_numeric_source_marker(value: str) -> bool:
 #: already uses.
 ALTERNATING_MINIMUM_PAGES = 3
 
+#: How many *consecutive* pages a line must open or close before the run is
+#: itself strong enough evidence, whatever share of the document it comes to.
+#: A book sets a new running head at every chapter, so no one variant reaches
+#: the share threshold however plainly each repeats. Four is one above the
+#: three-page floor the other rules use, because three consecutive pages is
+#: reachable by a sentence that happens to break the same way twice.
+CONSECUTIVE_PAGE_RUN = 4
+
+
+def longest_page_run(page_indexes: list[int]) -> int:
+    """The longest run of consecutive pages in an ascending list of indexes."""
+    if not page_indexes:
+        return 0
+    longest = run = 1
+    for previous, following in zip(page_indexes, page_indexes[1:]):
+        run = run + 1 if following == previous + 1 else 1
+        longest = max(longest, run)
+    return longest
+
 
 def repeated_page_artifacts(source_pages: list[dict[str, Any]]) -> set[str]:
     """Find repeated first/last lines only when the evidence is strong.
@@ -304,12 +335,17 @@ def repeated_page_artifacts(source_pages: list[dict[str, Any]]) -> set[str]:
     """
     if len(source_pages) < 3:
         return set()
-    counts: dict[str, int] = {}
-    for page in source_pages:
+    # Which pages each candidate appeared on, not how many times it was seen.
+    # A short page makes lines[:2] and lines[-2:] overlap, and counting the same
+    # line twice for one page inflated it against a threshold that is expressed
+    # in pages.
+    appearances: dict[str, list[int]] = {}
+    for index, page in enumerate(source_pages):
         lines = [normalise_artifact(line) for line in page["text"].splitlines() if normalise_artifact(line)]
-        for line in (lines[:2] + lines[-2:]):
+        for line in dict.fromkeys(lines[:2] + lines[-2:]):
             if 3 <= len(line) <= 130 and not line.isdigit():
-                counts[line] = counts.get(line, 0) + 1
+                appearances.setdefault(line, []).append(index)
+    counts = {line: len(pages_seen) for line, pages_seen in appearances.items()}
     # A running head is commonly set differently on left- and right-hand pages,
     # so each variant appears on about half the pages and NEITHER reaches a
     # 60% threshold. Requiring the strong evidence of a repeat is right; taking
@@ -321,6 +357,10 @@ def repeated_page_artifacts(source_pages: list[dict[str, Any]]) -> set[str]:
     alternating = sum(count for line, count in counts.items() if count >= ALTERNATING_MINIMUM_PAGES)
     if alternating >= threshold:
         artifacts |= {line for line, count in counts.items() if count >= ALTERNATING_MINIMUM_PAGES}
+    artifacts |= {
+        line for line, pages_seen in appearances.items()
+        if longest_page_run(pages_seen) >= CONSECUTIVE_PAGE_RUN
+    }
     return artifacts
 
 

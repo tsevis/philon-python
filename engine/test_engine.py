@@ -715,8 +715,22 @@ class PhilonEngineTest(unittest.TestCase):
         self.assertIn(engine.normalise_artifact("Diffusion-based Image Mosaics GI 26"), artifacts)
 
     def test_a_line_that_merely_repeats_a_few_times_is_not_a_running_head(self):
-        """The control: strong evidence is still required."""
-        pages = [{"number": n, "text": f"Ordinary opening line {n}\nBody sentence number {n}.\n{n}"}
+        """The control: strong evidence is still required.
+
+        The distinct openings vary by wording, not by a trailing number. A line
+        that differs from its neighbours only by its folio *is* a running head,
+        and setting that number aside before counting is what stops one leaking
+        into the body of every page; numbering these would have made the
+        fixture an example of the thing it exists to exclude.
+        """
+        openings = [
+            "An ordinary opening line", "A different way to begin",
+            "Another beginning entirely", "Something else opens here",
+            "A fresh opening sentence", "Yet another first line",
+            "This page starts differently", "A new opening again",
+            "One more distinct opening", "A last distinct opening",
+        ]
+        pages = [{"number": n, "text": f"{openings[n - 1]}\nBody sentence number {n}.\n{n}"}
                  for n in range(1, 11)]
         pages[0]["text"] = "A shared opening line\nBody sentence number 1.\n1"
         pages[1]["text"] = "A shared opening line\nBody sentence number 2.\n2"
@@ -1408,6 +1422,57 @@ class PageRotationTest(unittest.TestCase):
                     self.assertGreaterEqual(box["y0"], 0)
                     self.assertLessEqual(box["x1"], page["width"] + 1)
                     self.assertLessEqual(box["y1"], page["height"] + 1)
+
+
+class RunningHeadTest(unittest.TestCase):
+    """A running head is recognised even though its page number changes."""
+
+    @staticmethod
+    def book(head_for, pages=12):
+        """Pages with enough body that only the head and folio sit in the window."""
+        def page(number):
+            body = "\n".join(f"Body line {line} of page {number + 1}, saying its own thing."
+                              for line in range(4))
+            return {"text": f"{head_for(number)}\n{body}\n{number + 1}", "number": number + 1}
+        return [page(number) for number in range(pages)]
+
+    def test_a_head_carrying_its_page_number_is_recognised(self):
+        """The defect this fixes: counted literally, it never repeated."""
+        pages = self.book(lambda number: f"Symmetries of Culture   {number + 1}")
+        artifacts = engine.repeated_page_artifacts(pages)
+        self.assertIn("symmetries of culture", artifacts)
+
+    def test_a_leading_page_number_is_set_aside_too(self):
+        pages = self.book(lambda number: f"{number + 1}   Washburn and Crowe")
+        self.assertIn("washburn and crowe", engine.repeated_page_artifacts(pages))
+
+    def test_a_head_that_changes_each_chapter_is_still_recognised(self):
+        """No one variant reaches the share threshold; each run is the evidence."""
+        pages = self.book(lambda number: f"Chapter {number // 4 + 1} Introduction {number + 1}",
+                          pages=12)
+        artifacts = engine.repeated_page_artifacts(pages)
+        self.assertIn("chapter 1 introduction", artifacts)
+        self.assertIn("chapter 3 introduction", artifacts)
+
+    def test_body_text_is_not_taken_for_a_running_head(self):
+        pages = self.book(lambda number: f"A wholly different opening for page {number + 1} here")
+        self.assertEqual(engine.repeated_page_artifacts(pages), set())
+
+    def test_a_bare_page_number_is_still_not_an_artifact(self):
+        self.assertEqual(engine.normalise_artifact("47"), "47")
+
+    def test_normalising_never_empties_a_line(self):
+        for line in ["47", "1998", "- 12 -"]:
+            self.assertTrue(engine.normalise_artifact(line))
+
+    def test_a_short_document_is_left_alone(self):
+        self.assertEqual(engine.repeated_page_artifacts(self.book(lambda n: "Head", pages=2)), set())
+
+    def test_longest_page_run_counts_only_consecutive_pages(self):
+        self.assertEqual(engine.longest_page_run([]), 0)
+        self.assertEqual(engine.longest_page_run([0, 1, 2, 3]), 4)
+        self.assertEqual(engine.longest_page_run([0, 2, 4, 6]), 1)
+        self.assertEqual(engine.longest_page_run([0, 1, 5, 6, 7]), 3)
 
 
 if __name__ == "__main__":
