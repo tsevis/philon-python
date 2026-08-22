@@ -41,8 +41,13 @@ PHILON_DATA_DIR="$(mktemp -d)" QT_QPA_PLATFORM=offscreen "${PYTHON}" - <<'PYTHON
 from PySide6.QtWidgets import QApplication
 
 from philon_desktop.app import MainWindow
+from philon_desktop.gui import theme
 
 app = QApplication([])
+# The same call `main()` makes. Without it the offscreen plugin's default
+# family is resolved by walking the whole font database, which this step was
+# paying for in silence.
+theme.apply_application_font(app)
 window = MainWindow()
 views, names, tabs = window.views.count(), len(window.view_names), len(window.main_tabs)
 if views < 3:
