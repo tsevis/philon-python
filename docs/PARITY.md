@@ -32,6 +32,7 @@ the two copies is the check that says whether that happened.
 | PDF/image safety preflight | Implemented and verified | Canonical bounded preflight rejects invalid, empty, encrypted, oversized, malformed, multi-frame and decompression-bomb inputs. |
 | Native PDF/OCR adaptive routing | Implemented; Apple Vision runtime gated | Canonical PDFium extraction, native-text health, per-page routes and adaptive DPI retained. Packaged macOS build compiles the Apple Vision helper; runtime is explicitly unavailable without it. |
 | Evidence and source provenance | Implemented and verified | Block IDs, coordinates, confidence, route, warnings, alternatives, repair history, source crops, overlay exports and manifests retained. |
+| Philon IR version | 0.3.0 in both | The one number the two projects may not drift on: it names the evidence shape a consumer reads, and `validate_ir` refuses any other. 0.3.0 added the page's own `/Rotate`, the source-declared links measured onto each block, and the page selection a conversion covers. A cache entry is named after the IR version it holds, so an entry written against 0.2.0 is never reached rather than read and rejected. |
 | Output formats | Implemented and verified | Markdown, semantic HTML, IR, Marker-style clean-room JSON, chunks, optional embeddings, image assets, CSV, evidence and manifest. |
 | Source/output/review UI | Implemented and smoke-tested | Fit/actual-size, zoomable source preview, page navigation, PDF/normalized-image overlays, block selection, in-app edit, candidate restore, repair request and crop access. |
 | Persistent batch behavior | Implemented and verified | SQLite queue survives process restart, recovers interrupted running item, supports pause-after-current, cancel pending, retry, resume and export completed bundles. |
@@ -43,7 +44,7 @@ the two copies is the check that says whether that happened.
 
 | Check | Result |
 |---|---|
-| Canonical engine + fuzz + benchmark suite | 46 passed, 2 Apple Vision integration tests skipped because the helper was not enabled in this validation session. |
+| Canonical engine + fuzz + benchmark suite | 141 passed, 2 Apple Vision integration tests skipped because the helper was not enabled in this validation session. |
 | Desktop persistence unit tests | 3 passed. |
 | Policy/SBOM checks | Local-only, licence, and SBOM policies passed. |
 | Desktop startup | Qt application constructed off-screen; six native workspace/secondary pages available. |
