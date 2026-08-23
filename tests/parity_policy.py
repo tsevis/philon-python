@@ -1,11 +1,15 @@
 r"""Check the two engine copies against each other, rather than by hand.
 
 Philon is two repositories -- the Tauri/React source project and the PySide6
-port -- sharing one conversion engine. Three files are the shared part:
+port -- sharing one conversion engine. These files are the shared part, and none
+of them carries anything specific to the repository it sits in:
 
-    engine/philon_engine.py     identical but for ONE documented hunk
-    engine/model_fetch.py       byte-identical
-    engine/model-manifest.json  byte-identical
+    engine/philon_engine.py       identical but for ONE documented hunk
+    engine/model_fetch.py         byte-identical
+    engine/model-manifest.json    byte-identical
+    tests/parity_policy.py        byte-identical (this file)
+    scripts/git-hooks/pre-commit  byte-identical
+    scripts/install-git-hooks.sh  byte-identical
 
 Nothing used to check any of it. That is the most dangerous kind of invariant,
 because it breaks without a single test failing: each repository tests its own
@@ -39,10 +43,16 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 #: Byte-identical in both repositories. No exceptions, no documented hunks.
+#: This file is on the list, so an edit to the gate that reaches only one
+#: repository fails the gate. So is the pre-commit hook that runs it, for the
+#: same reason: a hook enforcing one thing here and another thing there is worse
+#: than no hook.
 IDENTICAL = (
     Path("engine/model_fetch.py"),
     Path("engine/model-manifest.json"),
     Path("tests/parity_policy.py"),
+    Path("scripts/git-hooks/pre-commit"),
+    Path("scripts/install-git-hooks.sh"),
 )
 
 #: Identical but for the one divergence recorded in the port's docs/PARITY.md.

@@ -28,9 +28,11 @@ manifest declares **15 packs, 8 fetchable, 3 unapproved**.
 `engine/philon_engine.py` must be identical in both repos except **one**
 documented hunk (a `RuntimeError` in an `except` tuple, commented in the source,
 recorded in `philon_p/docs/PARITY.md`). `engine/model_fetch.py`,
-`engine/model-manifest.json` and `tests/parity_policy.py` must be byte-identical
-in both. `tests/parity_policy.py` is what checks all of that, and it runs in
-both `verify-release` paths — see question 3.
+`engine/model-manifest.json`, `tests/parity_policy.py`,
+`scripts/git-hooks/pre-commit` and `scripts/install-git-hooks.sh` must be
+byte-identical in both. `tests/parity_policy.py` is what checks all of that; it
+runs in both `verify-release` paths and, once the hook is installed, on every
+commit — see question 3.
 
 ---
 
@@ -171,8 +173,25 @@ Nothing is unprotected in the meantime, and no work needs to wait for it. Every
 gate the Linux job would run — including the parity gate, the one that matters
 most here — already runs inside both `verify-release` paths, which is where they
 have always actually run. What CI adds on 1 September is that they run whether or
-not someone remembered. Until then, running `verify-release` before pushing is
-the whole of the protection, as it was before this session.
+not someone remembered.
+
+For the parity gate specifically, that gap is now covered by a pre-commit hook,
+installed in both clones on 2026-08-23:
+
+    zsh scripts/install-git-hooks.sh              # opt in
+    zsh scripts/install-git-hooks.sh --uninstall  # opt back out
+
+It sets `core.hooksPath` to the tracked `scripts/git-hooks`, refuses a commit
+that would leave the two copies out of parity, and is silent otherwise. It reads
+the working tree rather than the index, because the gate compares against the
+other repository's checkout and a checkout has no index — so a partial `git add`
+can still commit something the hook did not read, and `verify-release` remains
+the check that covers that. `git commit --no-verify` skips it. It was tested by
+introducing real drift and confirming that `git commit` refused and `HEAD` did
+not move.
+
+The hook and its installer are themselves on the byte-identical list, so a hook
+enforcing one thing here and another thing there fails the gate it runs.
 
 ## 5. Marker 2.0 is Apache-2.0 — the constraint is kept, on new grounds
 

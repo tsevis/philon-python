@@ -37,6 +37,12 @@ hidden inside that hunk fails the gate. Without the peer on the machine it skips
 loudly and passes, because one repository alone is a legitimate way to work;
 `PHILON_PARITY_REQUIRE=1` makes the skip an error, and CI sets it.
 
+`zsh scripts/install-git-hooks.sh` additionally installs it as a pre-commit
+hook, so the check runs on every commit rather than whenever `verify-release`
+is next run. The hook and its installer are on the byte-identical list too: a
+hook enforcing one thing here and another thing in the source project would be
+worse than no hook.
+
 | Area | Status | Evidence |
 |---|---|---|
 | Source GUI parity: skin, layout, splash, dark mode | Implemented | `philon_desktop/gui` ports the source `src/styles.css` design tokens (light and dark), the three-panel conversion grid, batch queue/report, secondary workspaces, first-launch splash at the original 640×580 measurements, and the maker's mark. Phosphor icon path data (MIT) is rendered natively; off-screen GUI tests cover tokens, icons, shell structure and ported logic. |

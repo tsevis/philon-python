@@ -1,0 +1,49 @@
+#!/bin/sh
+# Refuse a commit that would leave the two engine copies out of parity.
+#
+# `verify-release` already runs this gate, and that is where it really belongs.
+# This hook exists because `verify-release` runs when someone remembers, and CI
+# -- which would run it regardless -- is blocked on GitHub billing until
+# 2026-09-01. Between now and then this is what makes the check unconditional.
+# It is a stopgap, and it is safe to keep afterwards; it costs a few tens of
+# milliseconds and uses only the standard library.
+#
+# It checks the WORKING TREE, not the staged content. That is not a shortcut:
+# the gate compares this repository against the other one's checkout, which has
+# no index and no staged state, so a working-tree comparison is the only
+# coherent thing to ask. A partial `git add` can therefore commit something the
+# gate did not read -- `verify-release` is still the check that covers that.
+#
+# `git commit --no-verify` skips it, as it skips any hook.
+set -eu
+
+ROOT=$(git rev-parse --show-toplevel)
+GATE="${ROOT}/tests/parity_policy.py"
+
+# A checkout without the gate is not a failure to commit into. It predates the
+# gate, or is mid-rebase across the commit that added it.
+[ -f "${GATE}" ] || exit 0
+
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "pre-commit: python3 is not on PATH, so engine parity went unchecked." >&2
+  exit 0
+fi
+
+# Success is silent, because a hook that speaks on every commit stops being
+# read. A skip and a failure both reach stderr from the gate itself.
+if python3 "${GATE}" >/dev/null; then
+  exit 0
+fi
+
+cat >&2 <<'MESSAGE'
+
+The commit was refused: the two engine copies are out of parity.
+
+  Both repositories share one engine, and each one's suite only ever tests its
+  own copy -- so this breaks without a single test failing. Fix it in both
+  places rather than committing one side of it.
+
+  See the failure above, then:  diff the two engine/ directories
+  To commit anyway:             git commit --no-verify
+MESSAGE
+exit 1
