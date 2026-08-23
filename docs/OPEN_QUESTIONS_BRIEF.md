@@ -20,8 +20,8 @@ Both on `main`, clean, pushed, `main...origin/main`.
     cd philon    && npm run release:verify                             # exit 0
     cd philon_p  && PHILON_DATA_DIR=$(mktemp -d) zsh scripts/verify-release.sh   # exit 0
 
-Baselines: philon 106 workspace + 260 engine + 8 Rust, 5 policy gates;
-philon_p 44 desktop + 239 engine/fuzz/bench, 5 policy gates, shell with 5
+Baselines: philon 106 workspace + 265 engine + 8 Rust, 5 policy gates;
+philon_p 44 desktop + 244 engine/fuzz/bench, 5 policy gates, shell with 5
 agreeing views, zero `qt.qpa` font warnings. IR is at **0.5.0**. The model
 manifest declares **15 packs, 8 fetchable, 3 unapproved**.
 
@@ -333,6 +333,10 @@ Unchanged from the first draft. None of these was taken.
 - **The CCITT fax defect** in `documents/CACHE_BOUNDARY_AND_ASSET_COST.md`: one
   image fails to decode and produces different bytes on every extraction, so its
   `bytes_sha256` provenance changes run to run. Recorded, deliberately unfixed.
+  Note that an image Philon cannot decode is also one it cannot re-encode, so
+  such an image is exported as its own bytes and shows in the interface as a
+  placeholder rather than a picture. That is the honest outcome and not the
+  JPEG 2000 bug fixed on 2026-08-23.
 
 ---
 

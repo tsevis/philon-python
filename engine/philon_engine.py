@@ -3425,7 +3425,11 @@ def accessibility_report(ir: dict[str, Any]) -> dict[str, Any]:
 #: already has on disk. A manifest written atomically AFTER a phase succeeds is
 #: what makes reuse safe: an interrupted run leaves no manifest, so it cannot be
 #: mistaken for a finished one.
-ARTIFACT_MANIFEST_VERSION = "1.2"
+# 1.3 stopped exporting JPEG 2000 and TIFF as themselves. The bump is what
+# makes that reach documents already converted: `verified_artifact_manifest`
+# refuses a manifest written against another version, so the next conversion
+# re-extracts instead of reusing images nothing can display.
+ARTIFACT_MANIFEST_VERSION = "1.3"
 
 
 def verified_artifact_manifest(manifest_path: Path, source: Path, expected_source_pages: int | None = None) -> dict[str, Any] | None:
@@ -3563,13 +3567,24 @@ def describe_native_pdf_image(image: Any) -> tuple[bytes, str, dict[str, Any]]:
                 "pixel_width": width,
                 "pixel_height": height,
             })
-            supported_suffixes = {".png", ".jpg", ".jpeg", ".jp2", ".tif", ".tiff", ".jpx", ".webp"}
-            if suffix not in supported_suffixes:
+            # A suffix survives only if something can open it. JPEG 2000 and
+            # TIFF are legitimate PDF image formats carrying perfectly good
+            # filename extensions, and no browser engine displays either -- so
+            # keeping them left the interface showing a broken thumbnail beside
+            # a correct pixel size, and left "portable deliverable" meaning a
+            # file the person who asked for it cannot look at. They are decoded
+            # and re-encoded like any other unopenable filter. Nothing is lost
+            # that was ever provable: `source_bytes_sha256` is the digest of the
+            # bytes the PDF actually held, and `source_format` says what they
+            # were, so a re-encoded export still says exactly what it came from.
+            viewable_suffixes = {".png", ".jpg", ".jpeg", ".webp"}
+            if suffix not in viewable_suffixes:
                 encoded = io.BytesIO()
                 decoded.save(encoded, format="PNG")
                 data = encoded.getvalue()
                 suffix = ".png"
-                metadata.update({"format": "PNG", "mime_type": "image/png", "normalised_for_export": True})
+                metadata.update({"format": "PNG", "mime_type": "image/png",
+                                 "normalised_for_export": True, "source_format": image_format})
     except Exception as exc:
         metadata["inspection_error"] = str(exc)
     if not suffix:
