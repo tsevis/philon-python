@@ -1883,6 +1883,21 @@ class RuledTableRecoveryTest(unittest.TestCase):
         ))
 
     @classmethod
+    def wholly_merged_column_pdf(cls, path):
+        """A column line every row merges across, so the column is empty throughout.
+
+        The vertical at x=220 exists -- so the grid still has a column boundary
+        there -- but reaches only into the top row's height and covers no row
+        fully. Every row therefore merges across it, and the second column
+        carries nothing anywhere. This is the shape the reference paper produces
+        at 14x6 for three logical columns.
+        """
+        cls.page_pdf(path, cls.table_content(
+            [(y, 60, 460) for y in (628, 652, 676, 700)],
+            [(60, 628, 700), (220, 688, 700), (340, 628, 700), (460, 628, 700)],
+        ))
+
+    @classmethod
     def unrecoverably_ruled_pdf(cls, path):
         """Rules that leave an L of three openings, which no table can express.
 
@@ -2316,6 +2331,59 @@ class RuledTableRecoveryTest(unittest.TestCase):
             # the page wrote once.
             markdown = engine.render_markdown(ir)
             self.assertIn("| South 22 |  | 27 |", markdown)
+
+    def test_a_column_no_row_uses_is_collapsed_out_of_markdown(self):
+        """The column that exists only because of the geometry does not survive.
+
+        Markdown cannot say `colspan`, so a merged cell is written into one
+        column and the opening it swallowed is written as nothing. Where every
+        row merges across the same boundary, that column is blank from top to
+        bottom and says nothing at all -- so it is dropped rather than printed
+        as a column of empty cells.
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "merged-column.pdf"
+            self.wholly_merged_column_pdf(source)
+            ir, _, _ = engine.make_ir(source, "Standard")
+            if ir["pages"][0]["method"] != "pdfium-native":
+                self.skipTest("PDFium is not available for extraction")
+            table = next(block for block in ir["blocks"] if block.get("table"))
+            self.assertEqual(len(table["table"]["rows"][0]), 3,
+                             "the recovery still finds three columns")
+            self.assertTrue(all(row[1] is None for row in table["table"]["spans"]),
+                            "the middle column is covered in every row")
+
+            markdown = engine.render_markdown(ir)
+            self.assertIn("| Region Q1 | Q2 |", markdown)
+            self.assertNotIn("| Region Q1 |  | Q2 |", markdown)
+            # Two columns of separators, not three.
+            self.assertIn("| --- | --- |\n", markdown)
+            self.assertNotIn("| --- | --- | --- |", markdown)
+
+            # HTML says colspan, so it keeps all three and needs no collapsing.
+            # The IR and the CSV keep the square grid too: a consumer reading
+            # them by index is entitled to the grid the recovery found.
+            self.assertIn('colspan="2"', engine.render_html(ir))
+            self.assertEqual(len(table["table"]["rows"][0]), 3)
+
+    def test_a_column_some_rows_use_keeps_its_blanks(self):
+        """The other half of the rule, and the reason it is not simply 'drop blanks'.
+
+        Here only the bottom row merges. Dropping that column would pull `27`
+        under `Q1` and misalign every row above it, and filling the opening
+        would repeat a value the page wrote once. It stays blank.
+        """
+        rows = [["Region", "Q1", "Q2"], ["North", "14", "19"], ["South 22", "", "27"]]
+        spans = [[{"rowspan": 1, "colspan": 1}] * 3,
+                 [{"rowspan": 1, "colspan": 1}] * 3,
+                 [{"rowspan": 1, "colspan": 2}, None, {"rowspan": 1, "colspan": 1}]]
+        self.assertEqual(engine.markdown_table_grid(rows, spans), rows)
+
+    def test_a_grid_that_does_not_line_up_is_left_alone(self):
+        """A spans grid that disagrees with the rows is not something to guess about."""
+        rows = [["a", "b"], ["c", "d"]]
+        for spans in ([], [[None, None]], [[None], [None, None]]):
+            self.assertEqual(engine.markdown_table_grid(rows, spans), rows, spans)
 
     def test_a_full_lattice_carries_no_spans_at_all(self):
         page = self.recovered_page(self.ruled_pdf)
