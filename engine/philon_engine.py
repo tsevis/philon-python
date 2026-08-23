@@ -20,6 +20,7 @@ import html
 import io
 import json
 import logging
+import math
 import os
 import re
 import shutil
@@ -42,7 +43,11 @@ from typing import Any, Iterable
 #: selection a conversion covers. 0.4.0 added the tables recovered from the
 #: rules a page draws: each page's `ruled_tables` records the grids measured on
 #: it, and a block enclosed by one carries the cells they prove in `table`.
-IR_VERSION = "0.4.0"
+#: 0.5.0 added the merged cells a table's missing rules prove, as `spans` and
+#: `column_lines` on that record; the formula a page's own script geometry
+#: proves, as `formula` on the block it belongs to; and the provenance an
+#: automatic local repair leaves behind when a run asks for one.
+IR_VERSION = "0.5.0"
 ENGINE_VERSION = "philon-0.2.0"
 MAX_INPUT_BYTES = 500 * 1024 * 1024
 MAX_PDF_PAGES = 2_000
@@ -479,6 +484,23 @@ def table_rows(text: str) -> list[list[str]] | None:
     return rows
 
 
+def block_formula_text(block: dict[str, Any]) -> str:
+    """A formula as the page set it, with the scripts its geometry proved.
+
+    Falls back to the block's own text, so a formula whose page set no scripts
+    -- or whose baseline PDFium could not report -- still renders as the source
+    wrote it rather than not at all.
+    """
+    typeset = (block.get("formula") or {}).get("typeset")
+    return str(typeset) if typeset else str(block.get("text", ""))
+
+
+def block_table_spans(block: dict[str, Any]) -> list[list[dict[str, int] | None]]:
+    """The merged-cell layout a block's table carries, empty when it has none."""
+    spans = (block.get("table") or {}).get("spans")
+    return spans if isinstance(spans, list) else []
+
+
 def markdown_table_cell(value: str) -> str:
     """Make one cell safe to sit between Markdown's own column separators.
 
@@ -741,7 +763,7 @@ def geometric_native_parts(page: dict[str, Any], artifacts: set[str]) -> list[di
     #: The tables this page was measured to have ruled, and whose cells its own
     #: geometry therefore proves. An incomplete lattice is deliberately absent:
     #: it is reported as uncertainty and never assembled into a block.
-    ruled = [table for table in page.get("ruled_tables", []) if table.get("complete") and table.get("bbox")]
+    ruled = [table for table in page.get("ruled_tables", []) if table.get("recoverable") and table.get("bbox")]
 
     #: Whether the block being assembled was opened by a numbered heading line.
     #: A list, so the nested flush() can clear it without a nonlocal binding.
@@ -769,7 +791,11 @@ def geometric_native_parts(page: dict[str, Any], artifacts: set[str]) -> list[di
             return
         value = "\n".join(entry["text"] for entry in current).strip()
         if value:
-            parts.append({"text": value, "start": current[0]["start"], "end": current[-1]["end"]})
+            parts.append({
+                "text": value, "start": current[0]["start"], "end": current[-1]["end"],
+                "typeset": "\n".join(entry.get("typeset") or entry["text"] for entry in current).strip(),
+                "math_face": any(entry.get("math_face") for entry in current),
+            })
         current.clear()
 
     # Each table is gathered whole before the walk begins, rather than
@@ -802,6 +828,8 @@ def geometric_native_parts(page: dict[str, Any], artifacts: set[str]) -> list[di
                     "text": "\n".join(entry["text"] for entry in grouped).strip(),
                     "start": grouped[0]["start"], "end": grouped[-1]["end"],
                     "table_rows": ruled[owner]["rows"], "table_bbox": ruled[owner]["bbox"],
+                    "table_spans": ruled[owner].get("spans") or [],
+                    "table_column_lines": ruled[owner].get("column_lines") or [],
                 })
             previous_line = line
             continue
@@ -866,7 +894,11 @@ def geometric_native_parts(page: dict[str, Any], artifacts: set[str]) -> list[di
                                            lines[index + 1:index + 1 + TABLE_LOOKAHEAD],
                                            median_width, body_face):
             flush()
-            parts.append({"text": line["text"].strip(), "start": line["start"], "end": line["end"]})
+            parts.append({
+                "text": line["text"].strip(), "start": line["start"], "end": line["end"],
+                "typeset": (line.get("typeset") or line["text"]).strip(),
+                "math_face": bool(line.get("math_face")),
+            })
             previous_line = line
             continue
         if current and line.get("font") and prior and prior.get("font") and line["font"] != prior["font"]:
@@ -1057,6 +1089,83 @@ def rules_cross(along: dict[str, Any], across: dict[str, Any], tolerance: float)
     )
 
 
+def covered_interval(segments: list[tuple[float, float]], start: float, end: float, tolerance: float) -> bool:
+    """Whether a line's drawn runs cover a whole interval without a break.
+
+    A rule drawn per cell arrives as several touching runs, which together
+    close the interval; a rule that stops at a merged cell leaves a real gap.
+    Telling those apart is what separates a table with a spanning heading from
+    one whose geometry Philon cannot read.
+    """
+    merged: list[list[float]] = []
+    for run_start, run_end in sorted((float(a), float(b)) for a, b in segments):
+        if merged and run_start - tolerance <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], run_end)
+        else:
+            merged.append([run_start, run_end])
+    return any(run[0] - tolerance <= start and end <= run[1] + tolerance for run in merged)
+
+
+def grid_cell_spans(row_lines: list[float], column_lines: list[float],
+                    horizontals: list[dict[str, Any]], verticals: list[dict[str, Any]],
+                    tolerance: float) -> tuple[list[list[dict[str, int] | None]], bool]:
+    """Read a table's merged cells out of the rules its page did *not* draw.
+
+    A complete lattice encloses one cell per opening. Where a rule stops, the
+    two openings either side of it were never separated, and the page is saying
+    they are one cell -- a heading spanning its columns, a label spanning its
+    rows. That absence is as much drawn evidence as a rule's presence, so the
+    span is measured rather than guessed at.
+
+    Returns the spans in reading order, with `None` where a cell is covered by
+    an earlier anchor, and whether every merged region came out rectangular. A
+    region that does not -- an L of three openings around a fourth -- is a shape
+    no table can express, and is reported instead of being forced into one.
+    """
+    rows, columns = len(row_lines) - 1, len(column_lines) - 1
+    if rows < 1 or columns < 1:
+        return [], False
+    parent = {(row, column): (row, column) for row in range(rows) for column in range(columns)}
+
+    def find(cell: tuple[int, int]) -> tuple[int, int]:
+        while parent[cell] != cell:
+            parent[cell] = parent[parent[cell]]
+            cell = parent[cell]
+        return cell
+
+    def union(one: tuple[int, int], other: tuple[int, int]) -> None:
+        left, right = find(one), find(other)
+        if left != right:
+            parent[max(left, right)] = min(left, right)
+
+    for row in range(rows):
+        for column in range(1, columns):
+            if not covered_interval(verticals[column]["segments"], row_lines[row], row_lines[row + 1], tolerance):
+                union((row, column - 1), (row, column))
+    for column in range(columns):
+        for row in range(1, rows):
+            if not covered_interval(horizontals[row]["segments"], column_lines[column], column_lines[column + 1], tolerance):
+                union((row - 1, column), (row, column))
+
+    regions: dict[tuple[int, int], list[tuple[int, int]]] = {}
+    for cell in parent:
+        regions.setdefault(find(cell), []).append(cell)
+
+    spans: list[list[dict[str, int] | None]] = [[None] * columns for _ in range(rows)]
+    rectangular = True
+    for members in regions.values():
+        low_row = min(row for row, _ in members)
+        high_row = max(row for row, _ in members)
+        low_column = min(column for _, column in members)
+        high_column = max(column for _, column in members)
+        height, width = high_row - low_row + 1, high_column - low_column + 1
+        if height * width != len(members):
+            rectangular = False
+        # Reading order counts rows from the top of the page down, while the
+        # lines that bound them ascend from its foot.
+        spans[rows - 1 - high_row][low_column] = {"rowspan": height, "colspan": width}
+    return spans, rectangular
+
 def ruled_table_grids(horizontals: list[dict[str, Any]], verticals: list[dict[str, Any]],
                       tolerance: float = RULE_CROSSING_TOLERANCE_POINTS) -> list[dict[str, Any]]:
     """Find the grids in a page's rules: where two lines cross two others.
@@ -1105,12 +1214,19 @@ def ruled_table_grids(horizontals: list[dict[str, Any]], verticals: list[dict[st
         assigned |= group_h
         if len(group_h) < 2 or len(group_v) < 2:
             continue
-        row_lines = sorted(horizontals[index]["position"] for index in group_h)
-        column_lines = sorted(verticals[index]["position"] for index in group_v)
+        row_rules = sorted((horizontals[index] for index in group_h), key=lambda line: line["position"])
+        column_rules = sorted((verticals[index] for index in group_v), key=lambda line: line["position"])
+        row_lines = [line["position"] for line in row_rules]
+        column_lines = [line["position"] for line in column_rules]
+        spans, rectangular = grid_cell_spans(row_lines, column_lines, row_rules, column_rules, tolerance)
         grids.append({
             "row_lines": row_lines,
             "column_lines": column_lines,
             "complete": all((h_index, v_index) in crossings for h_index in group_h for v_index in group_v),
+            "spans": spans,
+            # A lattice with merged cells is still proven, provided every region
+            # the missing rules leave is a rectangle a table can express.
+            "recoverable": rectangular,
             "crossing_count": sum(len(meets_vertical[h_index] & group_v) for h_index in group_h),
         })
     # Page order: topmost first, then leftmost, so a document's tables are
@@ -1118,7 +1234,7 @@ def ruled_table_grids(horizontals: list[dict[str, Any]], verticals: list[dict[st
     return sorted(grids, key=lambda grid: (-grid["row_lines"][-1], grid["column_lines"][0]))
 
 
-def table_cell_text(characters: list[tuple[str, dict[str, Any] | None]], grid: dict[str, Any]) -> list[list[str]]:
+def table_cell_text(characters: list[dict[str, Any]], grid: dict[str, Any]) -> list[list[str]]:
     """Place each measured character in the cell its own centre falls inside.
 
     The centre decides, not the edges: a glyph may overhang the rule beside it,
@@ -1144,7 +1260,21 @@ def table_cell_text(characters: list[tuple[str, dict[str, Any] | None]], grid: d
     collected: list[list[list[tuple[int, str]]]] = [
         [[] for _ in range(column_count)] for _ in range(row_count)
     ]
-    for index, (character, box) in enumerate(characters):
+    spans = grid.get("spans") or []
+    #: Which anchor cell each opening belongs to. A merged region has one cell
+    #: however many openings the rules leave inside it, so its text is gathered
+    #: there rather than split across openings that are not separate cells.
+    anchor_of: dict[tuple[int, int], tuple[int, int]] = {}
+    for row_index, row_spans in enumerate(spans):
+        for column_index, span in enumerate(row_spans):
+            if not span:
+                continue
+            for covered_row in range(row_index, row_index + int(span["rowspan"])):
+                for covered_column in range(column_index, column_index + int(span["colspan"])):
+                    anchor_of[(covered_row, covered_column)] = (row_index, column_index)
+
+    for index, entry in enumerate(characters):
+        character, box = entry["character"], entry.get("bbox")
         if not box:
             continue
         column = band(grid["column_lines"], (float(box["x0"]) + float(box["x1"])) / 2)
@@ -1155,7 +1285,9 @@ def table_cell_text(characters: list[tuple[str, dict[str, Any] | None]], grid: d
             continue
         # Rows are read from the top of the page down, while the lines that
         # bound them ascend from its foot, so the topmost band is the last one.
-        collected[row_count - 1 - row][column].append((index, character))
+        cell = (row_count - 1 - row, column)
+        target_row, target_column = anchor_of.get(cell, cell)
+        collected[target_row][target_column].append((index, character))
 
     rows: list[list[str]] = []
     for row in collected:
@@ -1187,18 +1319,207 @@ def page_character_boxes(textpage: Any) -> list[Any] | None:
         return None
 
 
+def character_baseline_and_size(textpage: Any, index: int) -> tuple[tuple[float, float] | None, float | None]:
+    """One character's baseline point and the size it is actually set at.
+
+    Both come from PDFium directly rather than from the glyph's ink. Ink is a
+    poor witness for either: `=` inks a short band high above the baseline and
+    `.` a small one on it, so a reader that measures ink calls both of them
+    scripts, while `m` and `E` share a baseline at the same size and ink to
+    quite different heights.
+
+    The size is the *loose* box's height -- the font's own bounding box under
+    the text matrix -- not `FPDFText_GetFontSize`, which answers 1.0 whenever a
+    PDF scales its type through that matrix, as several of the reference papers
+    do. The loose box follows the matrix and so stays true where the reported
+    size does not.
+    """
+    try:
+        import pypdfium2.raw as raw  # type: ignore
+
+        origin_x, origin_y = ctypes.c_double(), ctypes.c_double()
+        if not raw.FPDFText_GetCharOrigin(textpage.raw, index, ctypes.byref(origin_x), ctypes.byref(origin_y)):
+            return None, None
+        loose = raw.FS_RECTF()
+        if not raw.FPDFText_GetLooseCharBox(textpage.raw, index, ctypes.byref(loose)):
+            return (origin_x.value, origin_y.value), None
+        return (origin_x.value, origin_y.value), float(loose.top) - float(loose.bottom)
+    except Exception:
+        return None, None
+
+
 def displayed_character_boxes(textpage: Any, extracted_text: str, rotation: int,
-                              source_width: float, source_height: float) -> list[tuple[str, dict[str, Any] | None]]:
-    """Each character of a page paired with its rectangle in the displayed frame."""
+                              source_width: float, source_height: float) -> list[dict[str, Any]]:
+    """Every character of a page, measured once, in the displayed frame.
+
+    Carries what each of its readers needs: the rectangle a table cell is
+    decided by, and the baseline and size a script is decided by. The size is
+    left in the page's own frame because only the ratio between characters on
+    one line is ever read from it, and a turn does not change a ratio.
+    """
     boxes = page_character_boxes(textpage)
     if not boxes:
         return []
-    paired: list[tuple[str, dict[str, Any] | None]] = []
+    measured: list[dict[str, Any]] = []
     for index, box in enumerate(boxes):
-        character = extracted_text[index] if index < len(extracted_text) else " "
-        measured = make_bbox(box[0], box[1], box[2], box[3], "pdf-page-points") if box else None
-        paired.append((character, bbox_to_displayed_frame(measured, rotation, source_width, source_height)))
-    return paired
+        origin, size = character_baseline_and_size(textpage, index)
+        baseline = None
+        if origin is not None:
+            baseline = rotate_point_to_displayed_frame(origin[0], origin[1], rotation, source_width, source_height)[1]
+        measured.append({
+            "character": extracted_text[index] if index < len(extracted_text) else " ",
+            "bbox": bbox_to_displayed_frame(
+                make_bbox(box[0], box[1], box[2], box[3], "pdf-page-points") if box else None,
+                rotation, source_width, source_height),
+            "baseline": baseline,
+            "size": size,
+        })
+    return measured
+
+
+#: Faces that set nothing but mathematics. A page that sets a run in one of
+#: these is stating the run is a formula as plainly as a rule states a table
+#: edge, which makes it measured evidence rather than a guess from characters.
+#: Deliberately only families whose *whole* purpose is maths: `TeXGyreTermes`
+#: sets ordinary prose and is excluded, while `TeXGyreTermesMath` is not.
+MATH_TYPEFACE_MARKERS = (
+    "cmmi", "cmsy", "cmex", "msam", "msbm", "rsfs", "eufm", "eusm",
+    "mathematicalpi", "stixmath", "stix-math", "xitsmath", "asanamath",
+    "cambriamath", "euclidmath", "latinmodernmath", "lmmath", "termesmath",
+    "pagellamath", "scholamath", "bonummath", "dejavumath", "libertinusmath",
+)
+
+#: How much smaller than the line's own body a character must be set before it
+#: can be read as a script. A superscript is conventionally around 0.6 of the
+#: body; 0.88 leaves room for a face whose digits are barely reduced while
+#: still refusing to call an ordinary capital a script.
+SCRIPT_MAX_HEIGHT_RATIO = 0.88
+#: ...and how far it must be displaced from the baseline. A raised character
+#: that is merely small -- a small capital, a footnote's own body face -- sits
+#: on the baseline and is not a script.
+SCRIPT_MIN_RAISE_RATIO = 0.22
+SCRIPT_MIN_DROP_RATIO = 0.06
+#: What share of a line must be set at a size before that size can be taken for
+#: the line's body. A quarter is low enough that `x` under a two-digit exponent
+#: still counts as the body, and high enough that a single tall bracket does
+#: not become one.
+SCRIPT_BODY_MINIMUM_SHARE = 0.25
+
+
+def is_math_typeface(face: str) -> bool:
+    """Whether a face is one that only ever sets mathematics."""
+    compact = re.sub(r"[^a-z]", "", str(face).lower())
+    return any(marker.replace("-", "") in compact for marker in MATH_TYPEFACE_MARKERS)
+
+
+def measured_script_roles(characters: list[dict[str, Any]]) -> list[str]:
+    """Read superscript and subscript out of where a line sets its characters.
+
+    A script is set smaller than the body it belongs to *and* off that body's
+    baseline. Both are required: size alone promotes a small capital, and
+    displacement alone promotes nothing at all, since PDFium reports the true
+    baseline and an ordinary descender shares it.
+
+    Both measurements come from PDFium rather than from glyph ink, which is
+    what makes this provable rather than a guess. Measured from ink, `=` reads
+    as a superscript in every line of prose that contains one.
+
+    A line PDFium cannot report a baseline or a size for, and a line set down
+    the display rather than across it, have nothing to measure against and are
+    reported as ordinary.
+    """
+    roles = ["normal"] * len(characters)
+    measured = [
+        (index, entry) for index, entry in enumerate(characters)
+        if not entry["character"].isspace() and entry.get("baseline") is not None
+        and entry.get("size") and float(entry["size"]) > 0
+    ]
+    if len(measured) < 2:
+        return roles
+    boxed = [entry["bbox"] for _, entry in measured if entry.get("bbox")]
+    if boxed:
+        span = max(float(box["x1"]) for box in boxed) - min(float(box["x0"]) for box in boxed)
+        rise = max(float(box["y1"]) for box in boxed) - min(float(box["y0"]) for box in boxed)
+        # A line that does not run across the display has no baseline in this
+        # frame, and script geometry cannot be read from it.
+        if span <= rise:
+            return roles
+
+    def tally(values: list[float], step: float = 0.25) -> dict[float, int]:
+        counts: dict[float, int] = {}
+        for value in values:
+            key = round(value / step) * step
+            counts[key] = counts.get(key, 0) + 1
+        return counts
+
+    # The body is the largest size a real share of the line is set at. Not the
+    # most common size, because a line can carry more script characters than
+    # body ones -- `x` with a two-digit exponent already does -- and not simply
+    # the largest, because one tall bracket or integral sign in an equation
+    # would then make every ordinary character beside it look like a script.
+    sizes = tally([float(entry["size"]) for _, entry in measured])
+    floor = max(1, math.ceil(len(measured) * SCRIPT_BODY_MINIMUM_SHARE))
+    common = [size for size, count in sizes.items() if count >= floor]
+    body_size = max(common) if common else max(sizes)
+    if body_size <= 0:
+        return roles
+    # ...and the baseline is where the characters at that size sit, which is
+    # the one measurement a script is displaced from by definition.
+    seated = [
+        float(entry["baseline"]) for _, entry in measured
+        if abs(float(entry["size"]) - body_size) <= 0.12 * body_size
+    ]
+    if not seated:
+        return roles
+    baseline = max(tally(seated).items(), key=lambda item: (item[1], -item[0]))[0]
+    for index, entry in measured:
+        if float(entry["size"]) > SCRIPT_MAX_HEIGHT_RATIO * body_size:
+            continue
+        offset = float(entry["baseline"]) - baseline
+        if offset >= SCRIPT_MIN_RAISE_RATIO * body_size:
+            roles[index] = "superscript"
+        elif offset <= -SCRIPT_MIN_DROP_RATIO * body_size:
+            roles[index] = "subscript"
+    return roles
+
+
+def typeset_from_characters(characters: list[dict[str, Any]], text: str) -> str:
+    """Write a line back out with the scripts the page measurably set.
+
+    The result is the source's own characters in the source's own order, with
+    nothing added but the grouping the geometry proves. Where a line sets no
+    scripts it comes back exactly as it went in, so a caller can tell the two
+    apart by comparing them.
+    """
+    roles = measured_script_roles(characters)
+    if all(role == "normal" for role in roles):
+        return text
+    pieces: list[str] = []
+    run: list[str] = []
+    current = "normal"
+
+    def close() -> None:
+        if not run:
+            return
+        body = "".join(run)
+        if current == "superscript":
+            pieces.append("^{" + body + "}")
+        elif current == "subscript":
+            pieces.append("_{" + body + "}")
+        else:
+            pieces.append(body)
+        run.clear()
+
+    for entry, role in zip(characters, roles):
+        character = entry["character"]
+        # A space inside a run does not end it, but it never opens one either.
+        effective = current if character.isspace() and current != "normal" else role
+        if effective != current:
+            close()
+            current = effective
+        run.append(character)
+    close()
+    return "".join(pieces)
 
 
 def page_rules(page: Any, rotation: int, source_width: float, source_height: float) -> dict[str, list[dict[str, Any]]]:
@@ -1244,7 +1565,7 @@ def page_rules(page: Any, rotation: int, source_width: float, source_height: flo
     return {"horizontal": horizontal, "vertical": vertical}
 
 
-def page_ruled_tables(page: Any, textpage: Any, extracted_text: str, rotation: int,
+def page_ruled_tables(page: Any, characters: list[dict[str, Any]], rotation: int,
                       source_width: float, source_height: float) -> list[dict[str, Any]]:
     """Recover the ruled tables a page draws, with the text inside their cells.
 
@@ -1260,7 +1581,6 @@ def page_ruled_tables(page: Any, textpage: Any, extracted_text: str, rotation: i
     )
     if not grids:
         return []
-    characters = displayed_character_boxes(textpage, extracted_text, rotation, source_width, source_height)
     recovered: list[dict[str, Any]] = []
     for grid in grids:
         # The grid's lines are already displayed-frame positions, so its
@@ -1269,13 +1589,22 @@ def page_ruled_tables(page: Any, textpage: Any, extracted_text: str, rotation: i
                          grid["column_lines"][-1], grid["row_lines"][-1], "pdf-page-points")
         if not bbox:
             continue
+        # A lattice need not be complete to be readable. Where a rule stops,
+        # the openings either side of it were never separated and the page is
+        # saying they are one cell; that is recovered as a span. What is not
+        # recoverable is a merged region that is not a rectangle, which no
+        # table can express and which is reported instead.
+        recoverable = bool(grid["recoverable"])
         recovered.append({
             "bbox": bbox,
             "row_count": len(grid["row_lines"]) - 1,
             "column_count": len(grid["column_lines"]) - 1,
             "complete": grid["complete"],
+            "recoverable": recoverable,
             "crossing_count": grid["crossing_count"],
-            "rows": table_cell_text(characters, grid) if grid["complete"] else [],
+            "rows": table_cell_text(characters, grid) if recoverable else [],
+            "spans": grid["spans"] if recoverable and not grid["complete"] else [],
+            "column_lines": list(grid["column_lines"]),
         })
     return recovered
 
@@ -1639,6 +1968,10 @@ def pdfium_extract(path: Path, selection: tuple[int, ...] | None = None) -> tupl
             source_width, source_height = source_page_size(width, height, rotation)
             textpage = page.get_textpage()
             extracted_text = textpage.get_text_range()
+            # One character scan for the page, shared by the table cells that
+            # need to know which opening a character sits in and the scripts
+            # that need to know where a line sets it.
+            characters = displayed_character_boxes(textpage, extracted_text, rotation, source_width, source_height)
             leading_trim = len(extracted_text) - len(extracted_text.lstrip())
             text = extracted_text.strip()
             spans: list[dict[str, Any]] = []
@@ -1659,14 +1992,16 @@ def pdfium_extract(path: Path, selection: tuple[int, ...] | None = None) -> tupl
                     rotation, source_width, source_height,
                 )
                 face, size = line_typeface(textpage, line_start, len(line_text), extracted_text)
-                line_spans.append({"text": line_text, "start": start, "end": end, "bbox": bbox, "font": face, "size": size})
+                line_spans.append({
+                    "text": line_text, "start": start, "end": end, "bbox": bbox, "font": face, "size": size,
+                    "typeset": typeset_from_characters(characters[line_start:line_start + len(line_text)], line_text),
+                    "math_face": is_math_typeface(face),
+                })
                 spans.append({"start": start, "end": end, "bbox": bbox})
             pages.append({
                 "number": index + 1, "width": width, "height": height, "text": text,
                 "rotation": rotation,
-                "ruled_tables": page_ruled_tables(
-                    page, textpage, extracted_text, rotation, source_width, source_height,
-                ),
+                "ruled_tables": page_ruled_tables(page, characters, rotation, source_width, source_height),
                 "links": measure_link_anchors(
                     textpage, extracted_text, leading_trim, text,
                     link_annotations[index] if index < len(link_annotations) else [],
@@ -1878,7 +2213,15 @@ def heading_depth(first_line: str) -> int:
     return min(6, number.group(1).count(".") + 1) if number else 2
 
 
-def classify_block(text: str, prominence: float | None = None, typeface: dict[str, Any] | None = None) -> tuple[str, int | None]:
+#: How long a run set in a mathematical face may be before the face stops
+#: being enough on its own. A displayed equation is short; a whole paragraph in
+#: a maths face is a page whose fonts are named misleadingly, and calling it one
+#: formula would swallow prose.
+FORMULA_FACE_CHARS = 400
+
+
+def classify_block(text: str, prominence: float | None = None, typeface: dict[str, Any] | None = None,
+                   typeset: str | None = None, math_face: bool = False) -> tuple[str, int | None]:
     """Name a block from its text, and from how the page sets that text.
 
     `prominence` is the block's line height against the page's median line
@@ -1897,7 +2240,14 @@ def classify_block(text: str, prominence: float | None = None, typeface: dict[st
     line_count = len([line for line in text.splitlines() if line.strip()])
     if table_rows(text):
         return "table", None
-    if is_formula(text):
+    # A run the page sets in a face that sets nothing but mathematics is a
+    # formula whatever its characters look like, and the script geometry the
+    # page measurably used is read before the characters are consulted: `E =
+    # mc2` carries one formula marker as characters and two once the raised 2
+    # it was actually set with is written down.
+    if math_face and len(text.strip()) <= FORMULA_FACE_CHARS:
+        return "formula", None
+    if is_formula(typeset or text) or is_formula(text):
         return "formula", None
     if opens_a_float_caption(first_line):
         return "caption", None
@@ -2061,9 +2411,13 @@ def _is_bolder_sibling(face: str, body_face: str) -> bool:
 
 def make_block(page: dict[str, Any], ordinal: int, text: str, start: int | None = None, end: int | None = None,
                ocr_line_indexes: list[int] | None = None, recovered_rows: list[list[str]] | None = None,
-               recovered_bbox: dict[str, Any] | None = None) -> dict[str, Any]:
+               recovered_bbox: dict[str, Any] | None = None,
+               recovered_spans: list[list[dict[str, int] | None]] | None = None,
+               recovered_columns: list[float] | None = None,
+               typeset: str | None = None, math_face: bool = False) -> dict[str, Any]:
     typeface = block_typeface(page, start, end)
-    kind, level = classify_block(text, prominence=block_prominence(page, start, end), typeface=typeface)
+    kind, level = classify_block(text, prominence=block_prominence(page, start, end), typeface=typeface,
+                                 typeset=typeset, math_face=math_face)
     # Rules the page drew outrank anything the characters suggest. The
     # classifier reads delimiters, and a ruled table carries none: its columns
     # are separated by geometry, so without this a proven table is filed as a
@@ -2094,8 +2448,14 @@ def make_block(page: dict[str, Any], ordinal: int, text: str, start: int | None 
                 "native_text_present": health["native_text_present"],
                 "replacement_characters": health["replacement_characters"],
                 "source_bbox_available": bbox is not None,
+                "measured_script_count": (typeset or "").count("^{") + (typeset or "").count("_{") if typeset else 0,
+                "set_in_mathematical_face": bool(math_face),
                 "ruled_table_recovered": bool(recovered_rows),
                 "ruled_table_cell_count": sum(len(row) for row in recovered_rows) if recovered_rows else 0,
+                "ruled_table_merged_cells": sum(
+                    1 for row in (recovered_spans or []) for span in row
+                    if span and (int(span["rowspan"]) > 1 or int(span["colspan"]) > 1)
+                ),
                 "source_declared_link_count": len(links),
                 "unanchorable_link_count": sum(1 for link in links if not is_anchorable_link(link["uri"])),
                 "source_bbox_coordinate_space": bbox["coordinate_space"] if bbox else None,
@@ -2105,11 +2465,21 @@ def make_block(page: dict[str, Any], ordinal: int, text: str, start: int | None 
             "repair_history": [],
         },
     }
+    # A formula keeps the scripts the page was measured to set, where they add
+    # something the flat text does not already say.
+    if kind == "formula" and typeset and typeset != text:
+        block["formula"] = {"typeset": typeset, "source": "measured-script-geometry"}
     if recovered_rows:
         block["table"] = {
             "rows": [list(row) for row in recovered_rows],
             "row_count": len(recovered_rows),
             "column_count": len(recovered_rows[0]) if recovered_rows else 0,
+            # Present only where the page's rules merged cells; a full lattice
+            # needs none, and an empty list says exactly that.
+            "spans": recovered_spans or [],
+            # Where the columns were measured, so a table continued onto the
+            # next page can be recognised by the rules it repeats.
+            "column_lines": [round(float(value), 4) for value in (recovered_columns or [])],
             "source": "ruled-geometry",
         }
     return block
@@ -2153,6 +2523,23 @@ def validate_ir(ir: dict[str, Any]) -> None:
             # rules that bound them, and no consumer should be handed it.
             if len({len(row) for row in rows}) != 1:
                 raise ValueError("A recovered table must have the same number of cells in every row.")
+            spans = table.get("spans")
+            if spans:
+                if not isinstance(spans, list) or len(spans) != len(rows):
+                    raise ValueError("A recovered table's spans must cover every one of its rows.")
+                for row, row_spans in zip(rows, spans):
+                    if not isinstance(row_spans, list) or len(row_spans) != len(row):
+                        raise ValueError("A recovered table's spans must cover every one of its cells.")
+                    for span in row_spans:
+                        if span is None:
+                            continue
+                        if not isinstance(span, dict) or not all(
+                                isinstance(span.get(name), int) and span[name] >= 1
+                                for name in ("rowspan", "colspan")):
+                            raise ValueError("A merged cell must span a whole number of rows and columns.")
+        formula = block.get("formula")
+        if formula is not None and not isinstance(formula.get("typeset"), str):
+            raise ValueError("A recovered formula must carry the text the page set.")
 
 
 def resolve_citations(blocks: list[dict[str, Any]]) -> None:
@@ -2175,7 +2562,36 @@ def resolve_citations(blocks: list[dict[str, Any]]) -> None:
             block["evidence"]["citation_targets"] = targets
 
 
+def tables_share_column_geometry(one: dict[str, Any], other: dict[str, Any],
+                                 tolerance: float = RULE_POSITION_TOLERANCE_POINTS) -> bool:
+    """Whether two recovered tables are drawn on the same columns.
+
+    A table continued onto the next page repeats its rules, not its headings:
+    the second page opens straight into data, so the row-matching test that
+    finds a repeated header never fires. What does carry across is where the
+    columns are ruled, and that is measured on both pages.
+
+    Only tables whose columns were measured are compared. A delimited reading
+    has no column positions, and treating its absent ones as equal would join
+    two unrelated tables that happened to follow each other.
+    """
+    first, second = one.get("table") or {}, other.get("table") or {}
+    if first.get("source") != "ruled-geometry" or second.get("source") != "ruled-geometry":
+        return False
+    left, right = first.get("column_lines") or [], second.get("column_lines") or []
+    if not left or len(left) != len(right):
+        return False
+    return all(abs(float(a) - float(b)) <= tolerance for a, b in zip(left, right))
+
+
 def resolve_cross_page_tables(blocks: list[dict[str, Any]]) -> None:
+    """Link a table to the block that continues it on the next page.
+
+    Two kinds of evidence do this, and which one applied is recorded, because
+    the export depends on it: a repeated header means the continuation's first
+    row is that header again and must not be exported twice, while matching
+    column geometry means the continuation is data from its first row down.
+    """
     previous: dict[str, Any] | None = None
     for block in blocks:
         if block["type"] != "table":
@@ -2186,9 +2602,15 @@ def resolve_cross_page_tables(blocks: list[dict[str, Any]]) -> None:
         if previous:
             prior_rows = block_table_rows(previous)
             different_pages = not previous.get("page") or not block.get("page") or previous.get("page") != block.get("page")
-            if different_pages and prior_rows and prior_rows[0] == rows[0] and len(prior_rows[0]) == len(rows[0]):
-                block["evidence"]["cross_page_continuation_of"] = previous["id"]
-                previous["evidence"]["continues_on_block"] = block["id"]
+            if different_pages and prior_rows:
+                repeated_header = prior_rows[0] == rows[0] and len(prior_rows[0]) == len(rows[0])
+                same_columns = tables_share_column_geometry(previous, block)
+                if repeated_header or same_columns:
+                    block["evidence"]["cross_page_continuation_of"] = previous["id"]
+                    block["evidence"]["cross_page_continuation_kind"] = (
+                        "repeated-header" if repeated_header else "matching-column-geometry"
+                    )
+                    previous["evidence"]["continues_on_block"] = block["id"]
         previous = block
 
 
@@ -2214,9 +2636,19 @@ def table_export_groups(blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
         while (next_id := current.get("evidence", {}).get("continues_on_block")) in by_id and next_id not in visited:
             current = by_id[next_id]
             rows = block_table_rows(current)
-            if not rows or rows[0] != merged_rows[0]:
+            if not rows:
                 break
-            merged_rows.extend(rows[1:])
+            # A continuation that repeats the header carries it again, and the
+            # joined table must not. One recognised by its columns opens
+            # straight into data, and dropping its first row would lose one.
+            if current.get("evidence", {}).get("cross_page_continuation_kind") == "matching-column-geometry":
+                if len(rows[0]) != len(merged_rows[0]):
+                    break
+                merged_rows.extend(rows)
+            else:
+                if rows[0] != merged_rows[0]:
+                    break
+                merged_rows.extend(rows[1:])
             source_blocks.append(current["id"])
             visited.add(current["id"])
         groups.append({"id": root["id"], "rows": merged_rows, "source_block_ids": source_blocks})
@@ -2297,7 +2729,8 @@ def make_ir(path: Path, profile: str, selection: tuple[int, ...] | None = None) 
         source_parts = geometric_native_parts(source_page, artifacts) if source_page["method"] == "pdfium-native" else ocr_parts_with_geometry(source_page, artifacts)
         page_blocks = [
             make_block(source_page, ordinal, part["text"], part.get("start"), part.get("end"), part.get("line_indexes"),
-                       part.get("table_rows"), part.get("table_bbox"))
+                       part.get("table_rows"), part.get("table_bbox"), part.get("table_spans"),
+                       part.get("table_column_lines"), part.get("typeset"), bool(part.get("math_face")))
             for ordinal, part in enumerate(source_parts, start=1)
         ]
         health = native_health(source_page["text"])
@@ -2320,7 +2753,7 @@ def make_ir(path: Path, profile: str, selection: tuple[int, ...] | None = None) 
             "native_features": source_page.get("native_features", {"fonts": [], "links": [], "geometry": "normalized-vision-rectangles" if source_page.get("ocr_lines") else "not-applicable"}),
             "source_artifacts": {"numeric_markers": source_page.get("numeric_source_markers", [])},
             "ruled_tables": [
-                {key: table[key] for key in ("bbox", "row_count", "column_count", "complete", "crossing_count")}
+                {key: table[key] for key in ("bbox", "row_count", "column_count", "complete", "recoverable", "crossing_count")}
                 for table in source_page.get("ruled_tables", [])
             ],
             "block_ids": [block["id"] for block in page_blocks],
@@ -2330,11 +2763,12 @@ def make_ir(path: Path, profile: str, selection: tuple[int, ...] | None = None) 
         # rule drawn only under the headings. Philon reports it and emits
         # nothing, because a table with invented cells is worse than none.
         for table in source_page.get("ruled_tables", []):
-            if not table.get("complete") and table["row_count"] >= 2 and table["column_count"] >= 2:
+            if not table.get("recoverable") and table["row_count"] >= 2 and table["column_count"] >= 2:
                 warnings.append(WarningRecord(
                     "RULED_TABLE_INCOMPLETE",
-                    f"A {table['row_count']}x{table['column_count']} arrangement of rules on this page does not "
-                    "close into a full grid, so its cells are not proven and no table was recovered from it.",
+                    f"A {table['row_count']}x{table['column_count']} arrangement of rules on this page leaves a "
+                    "merged region that is not a rectangle, so its cells are not proven and no table was "
+                    "recovered from it.",
                     page=source_page["number"],
                 ))
         blocks.extend(page_blocks)
@@ -2566,7 +3000,7 @@ def render_markdown(ir: dict[str, Any]) -> str:
             lines.extend("| " + " | ".join(markdown_table_cell(cell) for cell in row) + " |" for row in rows[1:])
             lines.append("")
         elif block["type"] == "formula":
-            lines.extend(["```text", text, "```", ""])
+            lines.extend(["```text", clean_reading_text(block_formula_text(block)), "```", ""])
         elif block["type"] == "caption":
             lines.extend([f"> {text}", ""])
         else:
@@ -2615,11 +3049,31 @@ def render_html(ir: dict[str, Any], include_facsimiles: bool = False) -> str:
                 body.append(f'<h{block["level"] or 2} {attrs}>{content}</h{block["level"] or 2}>')
             elif block["type"] == "table" and block_table_rows(block):
                 rows = block_table_rows(block) or []
-                header = "<thead><tr>" + "".join(f"<th scope=\"col\">{html.escape(cell)}</th>" for cell in rows[0]) + "</tr></thead>"
-                body_rows = "".join("<tr>" + "".join(f"<td>{html.escape(cell)}</td>" for cell in row) + "</tr>" for row in rows[1:])
+                spans = block_table_spans(block)
+
+                def cell_html(row_index: int, column_index: int, value: str, tag: str) -> str:
+                    """One cell, carrying the span the page's rules proved for it."""
+                    if spans:
+                        span = spans[row_index][column_index] if row_index < len(spans) and column_index < len(spans[row_index]) else None
+                        if not span:
+                            return ""
+                        extra = "".join(
+                            f' {name}="{span[name]}"' for name in ("rowspan", "colspan") if int(span[name]) > 1
+                        )
+                    else:
+                        extra = ""
+                    scope = ' scope="col"' if tag == "th" else ""
+                    return f"<{tag}{scope}{extra}>{html.escape(value)}</{tag}>"
+
+                header = "<thead><tr>" + "".join(cell_html(0, index, cell, "th") for index, cell in enumerate(rows[0])) + "</tr></thead>"
+                body_rows = "".join(
+                    "<tr>" + "".join(cell_html(offset + 1, index, cell, "td") for index, cell in enumerate(row)) + "</tr>"
+                    for offset, row in enumerate(rows[1:])
+                )
                 body.append("<table " + attrs + ">" + header + "<tbody>" + body_rows + "</tbody></table>")
             elif block["type"] == "formula":
-                body.append(f"<pre {attrs}><code>{content}</code></pre>")
+                formula = html.escape(clean_reading_text(block_formula_text(block)))
+                body.append(f"<pre {attrs}><code>{formula}</code></pre>")
             elif block["type"] == "caption":
                 body.append(f"<p class=\"philon-caption\" {attrs}>{content}</p>")
             else:
@@ -2656,7 +3110,7 @@ def machine_block_record(block: dict[str, Any], page_number: int | None) -> dict
         "id": block.get("id"), "page_id": block.get("page"), "page_number": page_number,
         "type": block.get("type"), "level": block.get("level"),
         "text": block.get("text", ""), "reading_text": clean_reading_text(str(block.get("text", ""))),
-        "bbox": block.get("bbox"), "table": block.get("table"),
+        "bbox": block.get("bbox"), "table": block.get("table"), "formula": block.get("formula"),
         "source": block.get("source"), "evidence": block.get("evidence"), "review": block.get("review"),
     }
 
@@ -3295,7 +3749,7 @@ def cache_path(cache_dir: Path, content_hash: str, profile: str, selection: tupl
     return cache_dir / f"{content_hash}-{profile.lower()}-{safe_slug(ENGINE_VERSION)}-ir{safe_slug(IR_VERSION)}{suffix}.json"
 
 
-def convert_file(path: Path, profile: str, output_root: Path, cache_root: Path, cache_policy: str = "use", outputs: Iterable[str] | None = None, progress: Any | None = None, selection: tuple[int, ...] | None = None) -> dict[str, Any]:
+def convert_file(path: Path, profile: str, output_root: Path, cache_root: Path, cache_policy: str = "use", outputs: Iterable[str] | None = None, progress: Any | None = None, selection: tuple[int, ...] | None = None, automatic_repair: bool = False, enabled_model_ids: Iterable[str] | None = None) -> dict[str, Any]:
     """Convert one file while exposing conservative, truthful milestones.
 
     The native extraction itself is a bounded third-party operation and cannot
@@ -3367,6 +3821,13 @@ def convert_file(path: Path, profile: str, output_root: Path, cache_root: Path, 
         warnings.extend(extraction_warnings)
         attach_native_pdf_assets_to_ir(ir, extracted_assets, destination)
         overlay_paths = render_source_overlay_diagnostics(ir, destination)
+    if automatic_repair:
+        # Deliberately after the cache entry is written. The cache holds the
+        # document as the source states it; a repaired reading belongs to the
+        # run that asked for one, and must not be served to a later run that
+        # did not.
+        warnings.extend(apply_automatic_repairs(ir, path, destination, enabled_model_ids, report))
+        validate_ir(ir)
     report("publishing", 94, "Writing evidence-linked exports")
     output_paths = write_outputs(ir, warnings, timings, destination, cached, selected_outputs)
     if needs_source_previews:
@@ -3413,6 +3874,10 @@ def action_convert(request: dict[str, Any], progress: Any | None = None) -> dict
     outputs = list(requested_outputs)
     if profile == "Verified" and "embeddings" not in outputs:
         outputs = [*outputs, "embeddings"]
+    # Automatic repair replaces extracted text with a local model's reading, so
+    # it happens only when a run explicitly asks for it. Nothing turns it on by
+    # default, and no profile implies it.
+    automatic_repair = bool(config.get("local_repair", False))
     root = Path(config.get("workspace_dir") or Path.home() / "Library" / "Application Support" / "Philon")
     output_root = root / "exports"
     cache_root = root / "cache"
@@ -3425,11 +3890,12 @@ def action_convert(request: dict[str, Any], progress: Any | None = None) -> dict
                 progress({"job_id": config.get("job_id"), "current": index + 1, "total": total, "percent": overall, "stage": stage, "message": message, "source_path": str(item)})
         try:
             report_file("starting", 1, f"Starting {item.name}")
-            results.append(convert_file(item, profile, output_root, cache_root, cache_policy, outputs, report_file, selection))
+            results.append(convert_file(item, profile, output_root, cache_root, cache_policy, outputs, report_file,
+                                        selection, automatic_repair, config.get("enabled_model_ids")))
         except Exception as exc:  # batch items fail independently
             failures.append({"source_path": str(item), "error": str(exc)})
             report_file("failed", 100, f"Could not convert {item.name}")
-    return {"id": str(uuid.uuid4()), "profile": profile, "local_only": True, "outputs": outputs, "cache_policy": cache_policy, "page_selection": compact_page_selection(selection) if selection else None, "local_repair_requested": bool(config.get("local_repair", False)), "results": results, "failures": failures, "created_at": now()}
+    return {"id": str(uuid.uuid4()), "profile": profile, "local_only": True, "outputs": outputs, "cache_policy": cache_policy, "page_selection": compact_page_selection(selection) if selection else None, "local_repair_requested": automatic_repair, "results": results, "failures": failures, "created_at": now()}
 
 
 def action_preflight(request: dict[str, Any], progress: Any | None = None) -> dict[str, Any]:
@@ -3700,15 +4166,177 @@ def render_bge_embeddings(chunks: list[dict[str, Any]]) -> tuple[dict[str, Any] 
         return None, WarningRecord("EMBEDDING_FAILED", f"Local BGE-M3 embedding was not produced: {exc}. Chunks were exported without vectors.")
 
 
+#: How many blocks one conversion may repair without being asked again. A
+#: document where dozens of regions fail the health gate is a document that
+#: needs a different route, not fifty local model runs; the cap keeps an
+#: automatic pass bounded and leaves the rest visible as evidence.
+AUTOMATIC_REPAIR_MAX_BLOCKS = 12
+
+#: The packs a repair may use, in the order they are preferred.
+REPAIR_PACK_PREFERENCE = ("qwen3.8-27b-local-repair", "olmocr-2-7b-local-candidate")
+
+
+def resolve_repair_pack(enabled_model_ids: Iterable[str] | None = None) -> dict[str, Any] | None:
+    """The approved, locally present repair pack a run may use, or nothing.
+
+    Every gate is applied here rather than at each call site: the pack must be
+    approved by Philon's own policy, enabled by the person running it, present
+    locally, and have a path to run from. A pack failing any of those is not a
+    pack, and no repair happens.
+    """
+    enabled = (
+        {item for item in enabled_model_ids if isinstance(item, str)}
+        if isinstance(enabled_model_ids, (list, tuple, set))
+        else set(REPAIR_PACK_PREFERENCE)
+    )
+    packs = model_status()["packs"]
+    for pack_id in REPAIR_PACK_PREFERENCE:
+        for pack in packs:
+            if (pack["id"] == pack_id and pack["id"] in enabled and pack["approved"]
+                    and pack["available_locally"] and pack.get("local_path")):
+                return pack
+    return None
+
+
+def blocks_awaiting_repair(ir: dict[str, Any]) -> list[dict[str, Any]]:
+    """The blocks Philon's own health gate already refuses to vouch for.
+
+    An automatic pass never goes looking for text to improve. It acts only
+    where the engine has already recorded that the native text did not meet
+    the confidence gate, which is the same set a person is shown for review.
+    """
+    return [
+        block for block in ir.get("blocks", [])
+        if block.get("evidence", {}).get("native_health", {}).get("requires_escalation")
+        and str(block.get("text", "")).strip()
+    ]
+
+
+def apply_automatic_repairs(ir: dict[str, Any], source: Path, output_dir: Path,
+                            enabled_model_ids: Iterable[str] | None = None,
+                            progress: Any | None = None) -> list[WarningRecord]:
+    """Run an approved local model over the regions Philon could not read.
+
+    This is the one place Philon replaces text it extracted, and it is off
+    unless a run asks for it. Three things hold even when it is on, because
+    the alternative is a document that quietly says something the source does
+    not:
+
+    The native text is never lost. It is retained as a candidate before the
+    replacement is made, which is the same shape a manual edit produces, so
+    `restore_candidate` puts it back and every export continues to carry both.
+
+    A candidate that fails the deterministic format checks is not applied. It
+    is retained unselected exactly as a manual repair would leave it, and the
+    block keeps the text the source gave it.
+
+    Every substitution is recorded in `repair_history` with the model that made
+    it and the fingerprint of the crop it read, so a reader can tell which
+    words are the source's and which are a model's.
+    """
+    findings: list[WarningRecord] = []
+    candidates = blocks_awaiting_repair(ir)
+    if not candidates:
+        return findings
+    pack = resolve_repair_pack(enabled_model_ids)
+    if not pack:
+        findings.append(WarningRecord(
+            "AUTOMATIC_REPAIR_UNAVAILABLE",
+            f"{len(candidates)} region(s) did not meet the confidence gate and no approved local repair "
+            "model was enabled, so the source text was left exactly as extracted.",
+        ))
+        return findings
+    if not source.exists():
+        findings.append(WarningRecord(
+            "AUTOMATIC_REPAIR_UNAVAILABLE",
+            "The source document is no longer available locally, so no region could be re-read.",
+        ))
+        return findings
+
+    pages = {str(page.get("id")): page for page in ir.get("pages", [])}
+    attempted = candidates[:AUTOMATIC_REPAIR_MAX_BLOCKS]
+    if len(candidates) > AUTOMATIC_REPAIR_MAX_BLOCKS:
+        findings.append(WarningRecord(
+            "AUTOMATIC_REPAIR_LIMITED",
+            f"{len(candidates)} regions did not meet the confidence gate and Philon repaired the first "
+            f"{AUTOMATIC_REPAIR_MAX_BLOCKS}. The rest are retained as extracted, for review.",
+        ))
+    applied = 0
+    for position, block in enumerate(attempted, start=1):
+        page = pages.get(str(block.get("page")))
+        if not page:
+            continue
+        if progress:
+            progress("repairing", 88, f"Re-reading region {position} of {len(attempted)} locally")
+        repair_mode = "table" if block.get("type") == "table" else "formula" if block.get("type") == "formula" else "transcription"
+        try:
+            crop_path = repair_crop(source, page, block, output_dir)
+            text, run = (
+                run_qwen38(Path(pack["local_path"]), crop_path, repair_mode)
+                if pack["id"] == "qwen3.8-27b-local-repair"
+                else run_olmocr(Path(pack["local_path"]), crop_path)
+            )
+        except Exception as exc:
+            findings.append(WarningRecord(
+                "AUTOMATIC_REPAIR_FAILED",
+                f"A region could not be re-read locally and was left as extracted: {exc}",
+                block_id=str(block.get("id")),
+            ))
+            continue
+        quality = assess_repair_candidate(text, repair_mode)
+        evidence = block.setdefault("evidence", {})
+        candidate = {
+            "kind": pack["id"], "text": text, "selected": False, "created_at": now(),
+            "source_crop": str(crop_path), "source_crop_sha256": sha256_file(crop_path),
+            "model": pack["id"], "repair_mode": repair_mode, "quality": quality, **run,
+        }
+        if quality["issues"]:
+            # Retained, unselected, and the source text stands. This is what a
+            # manual repair already does with a candidate it cannot vouch for.
+            evidence.setdefault("alternatives", []).append(candidate)
+            evidence.setdefault("repair_history", []).append({
+                "kind": "automatic-local-ocr", "status": "candidate-withheld", "at": now(),
+                "candidate_kind": candidate["kind"], "repair_mode": repair_mode,
+                "source_crop": str(crop_path), "reason": "; ".join(quality["issues"]),
+            })
+            findings.append(WarningRecord(
+                "AUTOMATIC_REPAIR_WITHHELD",
+                "A local repair candidate did not pass Philon's deterministic format checks and was "
+                "retained for review rather than applied: " + "; ".join(quality["issues"]),
+                block_id=str(block.get("id")),
+            ))
+            continue
+        # The source's own words are kept before they are replaced.
+        evidence.setdefault("alternatives", []).append(
+            {"text": block["text"], "kind": "native-source", "selected": False, "created_at": now()}
+        )
+        candidate["selected"] = True
+        evidence.setdefault("alternatives", []).append(candidate)
+        evidence.setdefault("repair_history", []).append({
+            "kind": "automatic-local-ocr", "status": "candidate-applied", "at": now(),
+            "candidate_kind": candidate["kind"], "repair_mode": repair_mode,
+            "source_crop": str(crop_path),
+        })
+        evidence.setdefault("validation", []).append("automatic-local-repair-applied")
+        block["text"] = text
+        block["review"] = {"action": "automatic_repair", "at": now(), "actor": "local-model",
+                           "status": "applied", "reason": pack["id"]}
+        applied += 1
+    if applied:
+        findings.append(WarningRecord(
+            "AUTOMATIC_REPAIR_APPLIED",
+            f"{applied} region(s) below the confidence gate were re-read locally by {pack['id']} and "
+            "replaced. The extracted text is retained beside each one and can be restored.",
+        ))
+    return findings
+
+
 def action_repair(request: dict[str, Any], progress: Any | None = None) -> dict[str, Any]:
     repair_mode = request.get("repair_mode", "transcription")
     if repair_mode not in {"transcription", "table", "formula"}:
         raise ValueError("Repair mode must be transcription, table, or formula.")
-    packs = model_status()["packs"]
-    enabled_config = request.get("enabled_model_ids")
-    enabled_model_ids = {item for item in enabled_config if isinstance(item, str)} if isinstance(enabled_config, list) else {"qwen3.8-27b-local-repair", "olmocr-2-7b-local-candidate"}
-    pack = next((item for pack_id in ("qwen3.8-27b-local-repair", "olmocr-2-7b-local-candidate") for item in packs if item["id"] == pack_id and item["id"] in enabled_model_ids and item["approved"] and item["available_locally"] and item.get("local_path")), None)
-    if not pack or not pack["approved"] or not pack["available_locally"] or not pack.get("local_path"):
+    pack = resolve_repair_pack(request.get("enabled_model_ids"))
+    if not pack:
         return {"status": "unavailable", "message": "No enabled local repair model was found. Enable an approved local model in Models; Philon retained the source evidence and did not fabricate a repair.", "block_id": request.get("block_id")}
     ir_path = Path(request.get("ir_path", ""))
     block_id = request.get("block_id")

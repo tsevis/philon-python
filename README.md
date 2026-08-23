@@ -61,13 +61,13 @@ than one being bumped to match a fix it does not contain. This port is 0.2.3
 while Philon is 0.2.2.
 
 What does have to match is the engine contract and the IR version. The engine
-contract remains at 0.2.0. The IR is at **0.4.0** in both projects: it gained
-the tables recovered from the rules a page draws, as `ruled_tables` on each page
-record and as a `table` of proven cells on each block one encloses. 0.3.0 had
-added the page's own `/Rotate`, the source-declared links measured onto each
-block, and the page selection a conversion covers. A document converted by
-either project at an IR version carries the same evidence and says so in
-`philon_ir_version`.
+contract remains at 0.2.0. The IR is at **0.5.0** in both projects: it gained
+the merged cells a table's missing rules prove, the formula a page's own script
+geometry proves, and the provenance an automatic local repair leaves behind.
+0.4.0 had added the tables recovered from the rules a page draws, and 0.3.0 the
+page's own `/Rotate`, the source-declared links measured onto each block, and
+the page selection a conversion covers. A document converted by either project
+at an IR version carries the same evidence and says so in `philon_ir_version`.
 
 A cache entry is named after the IR version it holds, so an entry written
 against an older shape is never reached rather than being read and rejected. An
