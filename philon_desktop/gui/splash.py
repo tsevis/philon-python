@@ -28,7 +28,6 @@ from .qt import (
 )
 
 ASSETS = Path(__file__).resolve().parents[1] / "assets"
-SPLASH_SEEN_KEY = "splash.seen.v1"
 
 
 class Overlay(QWidget):

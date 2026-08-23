@@ -13,7 +13,7 @@ because this build ships Qt rather than Tauri.
 
 TITLE = "Philon"
 SUBTITLE = "Documents converted with their evidence intact"
-VERSION = "0.2.5"
+VERSION = "0.2.6"
 
 ABOUT = (
     "Philon of Alexandria spent his life reading one tradition in the language of "
