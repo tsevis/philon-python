@@ -75,17 +75,42 @@ def ruled_table_summary(block: dict[str, Any] | None, page: dict[str, Any] | Non
     """
     recovered = (block or {}).get("table")
     if recovered:
-        return f"{recovered.get('row_count')} × {recovered.get('column_count')} recovered from ruled geometry"
+        merged = sum(
+            1 for row in (recovered.get("spans") or []) for span in row
+            if span and (int(span.get("rowspan", 1)) > 1 or int(span.get("colspan", 1)) > 1)
+        )
+        size = f"{recovered.get('row_count')} × {recovered.get('column_count')} recovered from ruled geometry"
+        return f"{size}, {merged} merged" if merged else size
     grids = (page or {}).get("ruled_tables") or []
     if not grids:
         return "None ruled"
-    closed = sum(1 for grid in grids if grid.get("complete"))
+    closed = sum(1 for grid in grids if grid.get("recoverable"))
     open_grids = len(grids) - closed
     if not open_grids:
         return f"{closed} recovered on this page"
     if not closed:
-        return f"{open_grids} ruled, none closing into a full grid"
-    return f"{closed} recovered, {open_grids} not closed"
+        return f"{open_grids} ruled, none a shape a table can hold"
+    return f"{closed} recovered, {open_grids} not recoverable"
+
+
+def measured_formula_summary(block: dict[str, Any] | None) -> str:
+    """Say what the page's own script geometry made of this block.
+
+    A block with measured scripts that is not a formula still says so: the
+    measurement was taken and is part of what Philon knows about the block, and
+    reporting it only where it changed the output would hide the rest.
+    """
+    if block is None:
+        return "Not measured"
+    findings = (block.get("evidence") or {}).get("findings") or {}
+    scripts = int(findings.get("measured_script_count") or 0)
+    if block.get("formula"):
+        return f"Recovered with {scripts} measured script{'' if scripts == 1 else 's'}"
+    if findings.get("set_in_mathematical_face"):
+        return "Set in a mathematical face"
+    if scripts:
+        return f"{scripts} measured script{'' if scripts == 1 else 's'}, not a formula"
+    return "None measured"
 
 
 def candidates_of(block: dict[str, Any] | None) -> list[dict[str, Any]]:
@@ -268,6 +293,7 @@ class EvidencePanel(QFrame):
             ("Page rotation", f"{int(page.get('rotation') or 0)}°, measured as displayed" if page.get("rotation") else "Upright"),
             ("Source links", link_summary((block or {}).get("links") or [])),
             ("Ruled tables", ruled_table_summary(block, page)),
+            ("Measured formulas", measured_formula_summary(block)),
             ("Native assets", f"{len(assets.get('items', []))} extracted with provenance" if assets else "None extracted"),
             ("Source markers", str(len(markers)) if markers else "None"),
             ("Overlay diagnostics", f"{len(overlays)} pages mapped" if overlays else "No measured overlays"),

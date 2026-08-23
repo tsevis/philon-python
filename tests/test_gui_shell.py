@@ -34,7 +34,8 @@ def sample_document() -> dict:
         "source_path": "/tmp/sample.pdf",
         "cache_hit": False,
         "pages": [{"id": "page-1", "number": 1, "width": 612, "height": 792, "rotation": 90, "route": {"decision": "native-text"},
-                   "ruled_tables": [{"bbox": None, "row_count": 3, "column_count": 3, "complete": True, "crossing_count": 16}]}],
+                   "ruled_tables": [{"bbox": None, "row_count": 3, "column_count": 3, "complete": True,
+                                     "recoverable": True, "crossing_count": 16}]}],
         "blocks": [
             {
                 "id": "block-1", "page": "page-1", "type": "heading", "level": 1, "text": "A Study of Readings",
@@ -286,13 +287,36 @@ class EvidenceForNewFieldsTest(unittest.TestCase):
         self.assertEqual(ruled_table_summary(None, {"ruled_tables": []}), "None ruled")
         self.assertEqual(ruled_table_summary({"table": {"row_count": 3, "column_count": 4}}, None),
                          "3 × 4 recovered from ruled geometry")
-        self.assertEqual(ruled_table_summary(None, {"ruled_tables": [{"complete": True}, {"complete": True}]}),
+        self.assertEqual(ruled_table_summary(None, {"ruled_tables": [{"recoverable": True}, {"recoverable": True}]}),
                          "2 recovered on this page")
-        # A lattice Philon refused to complete is reported, not dropped.
-        self.assertEqual(ruled_table_summary(None, {"ruled_tables": [{"complete": False}]}),
-                         "1 ruled, none closing into a full grid")
-        self.assertEqual(ruled_table_summary(None, {"ruled_tables": [{"complete": True}, {"complete": False}]}),
-                         "1 recovered, 1 not closed")
+        # A lattice Philon refused to force into a table is reported, not dropped.
+        self.assertEqual(ruled_table_summary(None, {"ruled_tables": [{"recoverable": False}]}),
+                         "1 ruled, none a shape a table can hold")
+        self.assertEqual(ruled_table_summary(None, {"ruled_tables": [{"recoverable": True}, {"recoverable": False}]}),
+                         "1 recovered, 1 not recoverable")
+
+    def test_the_summary_names_the_merged_cells_the_rules_proved(self):
+        from philon_desktop.gui.evidence_panel import ruled_table_summary
+
+        spans = [[{"rowspan": 1, "colspan": 2}, None], [{"rowspan": 1, "colspan": 1}, {"rowspan": 1, "colspan": 1}]]
+        self.assertEqual(ruled_table_summary({"table": {"row_count": 2, "column_count": 2, "spans": spans}}, None),
+                         "2 × 2 recovered from ruled geometry, 1 merged")
+
+    def test_the_summary_reads_for_each_shape_of_formula_evidence(self):
+        from philon_desktop.gui.evidence_panel import measured_formula_summary
+
+        self.assertEqual(measured_formula_summary(None), "Not measured")
+        self.assertEqual(measured_formula_summary({"evidence": {"findings": {}}}), "None measured")
+        self.assertEqual(
+            measured_formula_summary({"formula": {"typeset": "E = mc^{2}"},
+                                      "evidence": {"findings": {"measured_script_count": 1}}}),
+            "Recovered with 1 measured script")
+        self.assertEqual(
+            measured_formula_summary({"evidence": {"findings": {"measured_script_count": 2}}}),
+            "2 measured scripts, not a formula")
+        self.assertEqual(
+            measured_formula_summary({"evidence": {"findings": {"set_in_mathematical_face": True}}}),
+            "Set in a mathematical face")
 
     def test_the_summary_reads_for_each_shape_of_link_evidence(self):
         from philon_desktop.gui.evidence_panel import link_summary

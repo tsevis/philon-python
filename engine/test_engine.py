@@ -1733,7 +1733,7 @@ class IrVersionTest(unittest.TestCase):
         document.close()
 
     def test_the_ir_records_the_version_it_was_written_against(self):
-        self.assertEqual(engine.IR_VERSION, "0.4.0")
+        self.assertEqual(engine.IR_VERSION, "0.5.0")
 
     def test_an_ir_from_another_version_is_not_accepted(self):
         ir = {"philon_ir_version": "0.2.0", "pages": [], "blocks": []}
@@ -1876,6 +1876,20 @@ class RuledTableRecoveryTest(unittest.TestCase):
         ))
 
     @classmethod
+    def unrecoverably_ruled_pdf(cls, path):
+        """Rules that leave an L of three openings, which no table can express.
+
+        The vertical between the first two columns stops above the bottom row,
+        and the horizontal above the bottom row stops right of the first
+        column, so the opening at their corner is joined to the one beside it
+        *and* the one above it while those two stay separated from each other.
+        """
+        cls.page_pdf(path, cls.table_content(
+            [(628, 60, 460), (652, 220, 460), (676, 60, 460), (700, 60, 460)],
+            [(60, 628, 700), (220, 652, 700), (340, 628, 700), (460, 628, 700)],
+        ))
+
+    @classmethod
     def unruled_pdf(cls, path):
         """The same cells with no rules at all: a table only to the eye."""
         parts = [b"BT /F1 11 Tf\n"]
@@ -1883,6 +1897,16 @@ class RuledTableRecoveryTest(unittest.TestCase):
             parts.append(f"1 0 0 1 {x} {y} Tm ({text}) Tj\n".encode())
         parts.append(b"ET\n")
         cls.page_pdf(path, b"".join(parts))
+
+    @staticmethod
+    def character(value, left, bottom, right, top, baseline=None, size=None):
+        """One measured character, in the shape the page scan produces."""
+        return {
+            "character": value,
+            "bbox": engine.make_bbox(left, bottom, right, top, "pdf-page-points"),
+            "baseline": bottom if baseline is None else baseline,
+            "size": (top - bottom) if size is None else size,
+        }
 
     def recovered_page(self, build, rotation=0):
         """Extract one built fixture, skipping where PDFium is unavailable."""
@@ -1993,30 +2017,30 @@ class RuledTableRecoveryTest(unittest.TestCase):
     def test_a_character_is_placed_by_its_own_centre(self):
         grid = {"row_lines": [0.0, 10.0, 20.0], "column_lines": [0.0, 10.0, 20.0]}
         characters = [
-            ("A", engine.make_bbox(1, 11, 3, 19, "pdf-page-points")),
-            ("B", engine.make_bbox(11, 11, 13, 19, "pdf-page-points")),
-            ("C", engine.make_bbox(1, 1, 3, 9, "pdf-page-points")),
+            self.character("A", 1, 11, 3, 19),
+            self.character("B", 11, 11, 13, 19),
+            self.character("C", 1, 1, 3, 9),
         ]
         # Row 0 is the topmost band, though its lines are the last two.
         self.assertEqual(engine.table_cell_text(characters, grid), [["A", "B"], ["C", ""]])
 
     def test_a_cell_no_character_falls_inside_stays_empty(self):
         grid = {"row_lines": [0.0, 10.0], "column_lines": [0.0, 10.0, 20.0]}
-        characters = [("A", engine.make_bbox(1, 1, 3, 9, "pdf-page-points"))]
+        characters = [self.character("A", 1, 1, 3, 9)]
         self.assertEqual(engine.table_cell_text(characters, grid), [["A", ""]])
 
     def test_a_character_outside_every_cell_is_left_out(self):
         grid = {"row_lines": [0.0, 10.0], "column_lines": [0.0, 10.0]}
-        characters = [("A", engine.make_bbox(50, 50, 52, 58, "pdf-page-points")), ("B", None)]
+        characters = [self.character("A", 50, 50, 52, 58), {"character": "B", "bbox": None, "baseline": None, "size": None}]
         self.assertEqual(engine.table_cell_text(characters, grid), [[""]])
 
     def test_a_gap_in_the_read_order_becomes_a_space(self):
         """A character PDFium gives no rectangle for is one it drew nothing for."""
         grid = {"row_lines": [0.0, 10.0], "column_lines": [0.0, 20.0]}
         characters = [
-            ("N", engine.make_bbox(1, 1, 3, 9, "pdf-page-points")),
-            (" ", None),
-            ("A", engine.make_bbox(5, 1, 7, 9, "pdf-page-points")),
+            self.character("N", 1, 1, 3, 9),
+            {"character": " ", "bbox": None, "baseline": None, "size": None},
+            self.character("A", 5, 1, 7, 9),
         ]
         self.assertEqual(engine.table_cell_text(characters, grid), [["N A"]])
 
@@ -2059,7 +2083,7 @@ class RuledTableRecoveryTest(unittest.TestCase):
             ir, warnings, _ = engine.make_ir(source, "Standard")
             if ir["pages"][0]["method"] != "pdfium-native":
                 self.skipTest("PDFium is not available for extraction")
-            self.assertEqual(ir["philon_ir_version"], "0.4.0")
+            self.assertEqual(ir["philon_ir_version"], "0.5.0")
             self.assertEqual(ir["pages"][0]["ruled_tables"][0]["row_count"], 3)
             table = next(block for block in ir["blocks"] if block["type"] == "table")
             self.assertEqual(engine.block_table_rows(table), self.RECOVERED)
@@ -2106,7 +2130,7 @@ class RuledTableRecoveryTest(unittest.TestCase):
                 {"text": "North 14", "start": 26, "end": 34, "bbox": below},
             ],
             "ruled_tables": [{
-                "complete": True,
+                "complete": True, "recoverable": True,
                 "bbox": engine.make_bbox(60, 640, 460, 700, "pdf-page-points"),
                 "rows": [["Region", "Q1"], ["North", "14"]],
                 "row_count": 2, "column_count": 2, "crossing_count": 9,
@@ -2120,7 +2144,7 @@ class RuledTableRecoveryTest(unittest.TestCase):
         # ...and the line that fell outside the rules is still its own block.
         self.assertIn("A stray caption", [part["text"] for part in parts])
 
-    def test_an_incomplete_lattice_never_reaches_the_segmenter(self):
+    def test_an_unrecoverable_lattice_never_reaches_the_segmenter(self):
         page = {
             "text": "Region Q1", "body_font": "", "body_size": 0.0,
             "native_text_lines": [
@@ -2128,7 +2152,7 @@ class RuledTableRecoveryTest(unittest.TestCase):
                  "bbox": engine.make_bbox(70, 680, 400, 692, "pdf-page-points")},
             ],
             "ruled_tables": [{
-                "complete": False,
+                "complete": False, "recoverable": False,
                 "bbox": engine.make_bbox(60, 640, 460, 700, "pdf-page-points"),
                 "rows": [], "row_count": 2, "column_count": 2, "crossing_count": 8,
             }],
@@ -2168,18 +2192,147 @@ class RuledTableRecoveryTest(unittest.TestCase):
         turned = self.recovered_page(self.ruled_pdf, 270)["ruled_tables"][0]["rows"]
         self.assertEqual([list(column) for column in zip(*upright)][::-1], turned)
 
+    # -- a table continued onto the next page ---------------------------------
+
+    @classmethod
+    def continued_pdf(cls, path):
+        """Two pages ruled on the same columns; the second opens into data.
+
+        This is what a real continued table looks like: the rules repeat, the
+        headings do not. The row-matching test finds nothing to match.
+        """
+        def content(cells):
+            parts = [b"BT /F1 11 Tf\n"]
+            for text, x, y in cells:
+                parts.append(f"1 0 0 1 {x} {y} Tm ({text}) Tj\n".encode())
+            parts.append(b"ET\n0.6 w 0 0 0 RG\n")
+            for y in (652, 676, 700):
+                parts.append(f"60 {y} m 460 {y} l S\n".encode())
+            for x in (60, 220, 460):
+                parts.append(f"{x} 652 m {x} 700 l S\n".encode())
+            return b"".join(parts)
+
+        first = content([("Region", 70, 682), ("Q1", 230, 682), ("North", 70, 658), ("14", 230, 658)])
+        second = content([("South", 70, 682), ("22", 230, 682), ("East", 70, 658), ("31", 230, 658)])
+        objects = [
+            b"<< /Type /Catalog /Pages 2 0 R >>",
+            b"<< /Type /Pages /Kids [3 0 R 6 0 R] /Count 2 >>",
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>",
+            b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+            b"<< /Length " + str(len(first)).encode() + b" >>\nstream\n" + first + b"endstream",
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 7 0 R >>",
+            b"<< /Length " + str(len(second)).encode() + b" >>\nstream\n" + second + b"endstream",
+        ]
+        out = bytearray(b"%PDF-1.4\n")
+        offsets = []
+        for number, body in enumerate(objects, start=1):
+            offsets.append(len(out))
+            out += f"{number} 0 obj\n".encode() + body + b"\nendobj\n"
+        start_xref = len(out)
+        out += f"xref\n0 {len(objects) + 1}\n".encode() + b"0000000000 65535 f \n"
+        for offset in offsets:
+            out += f"{offset:010d} 00000 n \n".encode()
+        out += (f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\n"
+                f"startxref\n{start_xref}\n").encode() + b"%%EOF\n"
+        Path(path).write_bytes(bytes(out))
+
+    def test_a_table_continued_by_its_rules_is_joined_for_export(self):
+        """The header does not repeat, so only the columns can say it continues."""
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "continued.pdf"
+            self.continued_pdf(source)
+            ir, _, _ = engine.make_ir(source, "Standard")
+            if ir["pages"][0]["method"] != "pdfium-native":
+                self.skipTest("PDFium is not available for extraction")
+            tables = [block for block in ir["blocks"] if block.get("table")]
+            self.assertEqual(len(tables), 2)
+            self.assertEqual(tables[1]["evidence"]["cross_page_continuation_of"], tables[0]["id"])
+            self.assertEqual(tables[1]["evidence"]["cross_page_continuation_kind"], "matching-column-geometry")
+            self.assertEqual(tables[0]["evidence"]["continues_on_block"], tables[1]["id"])
+
+            groups = engine.table_export_groups(ir["blocks"])
+            self.assertEqual(len(groups), 1)
+            # Every row of the continuation survives: it opened into data, so
+            # none of it is a header to drop.
+            self.assertEqual(groups[0]["rows"], [["Region", "Q1"], ["North", "14"],
+                                                 ["South", "22"], ["East", "31"]])
+            self.assertEqual(groups[0]["source_block_ids"], [tables[0]["id"], tables[1]["id"]])
+
+    def test_columns_measured_apart_are_not_one_table(self):
+        left = {"table": {"source": "ruled-geometry", "column_lines": [60.0, 220.0, 460.0]}}
+        same = {"table": {"source": "ruled-geometry", "column_lines": [60.4, 219.8, 460.2]}}
+        shifted = {"table": {"source": "ruled-geometry", "column_lines": [90.0, 250.0, 490.0]}}
+        narrower = {"table": {"source": "ruled-geometry", "column_lines": [60.0, 460.0]}}
+        self.assertTrue(engine.tables_share_column_geometry(left, same))
+        self.assertFalse(engine.tables_share_column_geometry(left, shifted))
+        self.assertFalse(engine.tables_share_column_geometry(left, narrower))
+
+    def test_a_delimited_table_is_never_joined_by_geometry_it_does_not_have(self):
+        """Absent column positions must not compare equal to absent ones."""
+        one = {"table": {"source": "ruled-geometry", "column_lines": []}}
+        other = {"table": {"source": "ruled-geometry", "column_lines": []}}
+        self.assertFalse(engine.tables_share_column_geometry(one, other))
+        self.assertFalse(engine.tables_share_column_geometry({}, {}))
+
     # -- prove or mark --------------------------------------------------------
 
-    def test_a_lattice_that_does_not_close_is_reported_and_not_emitted(self):
+    def test_a_rule_that_stops_is_read_as_the_merged_cell_it_leaves(self):
+        """The absence of a rule is drawn evidence as much as its presence."""
+        page = self.recovered_page(self.partly_ruled_pdf)
+        recovered = page["ruled_tables"][0]
+        self.assertFalse(recovered["complete"])
+        self.assertTrue(recovered["recoverable"])
+        # The vertical between the first two columns stops above the last row,
+        # so that row's first two openings were never separated.
+        self.assertEqual(recovered["rows"], [["Region", "Q1", "Q2"],
+                                             ["North", "14", "19"],
+                                             ["South 22", "", "27"]])
+        self.assertEqual(recovered["spans"][2][0], {"rowspan": 1, "colspan": 2})
+        self.assertIsNone(recovered["spans"][2][1])
+        self.assertEqual(recovered["spans"][0][0], {"rowspan": 1, "colspan": 1})
+
+    def test_a_merged_cell_reaches_html_as_one_cell_that_spans(self):
         with tempfile.TemporaryDirectory() as directory:
-            source = Path(directory) / "partial.pdf"
+            source = Path(directory) / "merged.pdf"
             self.partly_ruled_pdf(source)
+            ir, _, _ = engine.make_ir(source, "Standard")
+            if ir["pages"][0]["method"] != "pdfium-native":
+                self.skipTest("PDFium is not available for extraction")
+            table = next(block for block in ir["blocks"] if block.get("table"))
+            self.assertEqual(table["evidence"]["findings"]["ruled_table_merged_cells"], 1)
+            document = engine.render_html(ir)
+            self.assertIn('<td colspan="2">South 22</td>', document)
+            # The opening the merge swallowed is not emitted as an empty cell.
+            self.assertNotIn("<td></td>", document)
+            # Markdown has no way to say colspan, so it keeps the grid square
+            # and leaves the covered opening blank rather than repeating a value
+            # the page wrote once.
+            markdown = engine.render_markdown(ir)
+            self.assertIn("| South 22 |  | 27 |", markdown)
+
+    def test_a_full_lattice_carries_no_spans_at_all(self):
+        page = self.recovered_page(self.ruled_pdf)
+        self.assertEqual(page["ruled_tables"][0]["spans"], [])
+        document = engine.render_html({
+            "philon_ir_version": engine.IR_VERSION,
+            "document": {"source": {"filename": "t.pdf"}},
+            "pages": [{"id": "page-1", "number": 1}],
+            "blocks": [{"id": "b1", "page": "page-1", "type": "table", "level": None, "text": "x", "links": [],
+                        "source": {"method": "pdfium-native", "confidence": 1.0, "language": "und"},
+                        "table": {"rows": [["a", "b"]], "spans": []}}],
+        })
+        self.assertNotIn("colspan", document)
+
+    def test_a_merged_region_that_is_not_a_rectangle_is_reported_and_not_emitted(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "unrecoverable.pdf"
+            self.unrecoverably_ruled_pdf(source)
             ir, warnings, _ = engine.make_ir(source, "Standard")
             if ir["pages"][0]["method"] != "pdfium-native":
                 self.skipTest("PDFium is not available for extraction")
             recovered = ir["pages"][0]["ruled_tables"]
             self.assertEqual(len(recovered), 1)
-            self.assertFalse(recovered[0]["complete"])
+            self.assertFalse(recovered[0]["recoverable"])
             self.assertIn("RULED_TABLE_INCOMPLETE", [warning.code for warning in warnings])
             self.assertFalse([block for block in ir["blocks"] if block.get("table")])
 
@@ -2206,6 +2359,30 @@ class RuledTableRecoveryTest(unittest.TestCase):
         }
         with self.assertRaises(ValueError):
             engine.validate_ir(ir)
+
+    def test_spans_that_do_not_cover_the_table_are_refused(self):
+        def ir_with(table):
+            return {"philon_ir_version": engine.IR_VERSION, "pages": [{"id": "page-1"}],
+                    "blocks": [{"id": "b1", "page": "page-1", "type": "table", "text": "x", "table": table}]}
+
+        rows = [["a", "b"], ["c", "d"]]
+        engine.validate_ir(ir_with({"rows": rows, "spans": []}))
+        for broken in (
+            {"rows": rows, "spans": [[None, None]]},
+            {"rows": rows, "spans": [[None], [None, None]]},
+            {"rows": rows, "spans": [[{"rowspan": 0, "colspan": 1}, None], [None, None]]},
+            {"rows": rows, "spans": [[{"rowspan": 1}, None], [None, None]]},
+        ):
+            with self.assertRaises(ValueError):
+                engine.validate_ir(ir_with(broken))
+
+    def test_a_formula_without_the_text_the_page_set_is_refused(self):
+        with self.assertRaises(ValueError):
+            engine.validate_ir({
+                "philon_ir_version": engine.IR_VERSION, "pages": [{"id": "page-1"}],
+                "blocks": [{"id": "b1", "page": "page-1", "type": "formula", "text": "x",
+                            "formula": {"source": "measured-script-geometry"}}],
+            })
 
     def test_a_recovered_table_without_rows_is_refused(self):
         ir = {
@@ -2246,6 +2423,338 @@ class RuledTableRecoveryTest(unittest.TestCase):
     def test_a_page_that_draws_nothing_reports_no_rules(self):
         page = self.recovered_page(self.unruled_pdf)
         self.assertEqual(page["ruled_tables"], [])
+
+
+class MeasuredFormulaTest(unittest.TestCase):
+    """A formula is recognised from how the page set it, not from guesswork.
+
+    PDFium reports each character's true baseline and the size it is set at.
+    Both are needed: glyph ink is a poor witness for either, and a reader that
+    measures ink calls the `=` in every line of prose a superscript.
+    """
+
+    @staticmethod
+    def typeset_pdf(path, runs):
+        """One page whose runs each carry their own size and position."""
+        parts = [b"BT\n"]
+        for text, x, y, size in runs:
+            parts.append(f"/F1 {size} Tf 1 0 0 1 {x} {y} Tm ({text}) Tj\n".encode())
+        parts.append(b"ET\n")
+        content = b"".join(parts)
+        objects = [
+            b"<< /Type /Catalog /Pages 2 0 R >>",
+            b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>",
+            b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+            b"<< /Length " + str(len(content)).encode() + b" >>\nstream\n" + content + b"endstream",
+        ]
+        out = bytearray(b"%PDF-1.4\n")
+        offsets = []
+        for number, body in enumerate(objects, start=1):
+            offsets.append(len(out))
+            out += f"{number} 0 obj\n".encode() + body + b"\nendobj\n"
+        start_xref = len(out)
+        out += f"xref\n0 {len(objects) + 1}\n".encode() + b"0000000000 65535 f \n"
+        for offset in offsets:
+            out += f"{offset:010d} 00000 n \n".encode()
+        out += (f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\n"
+                f"startxref\n{start_xref}\n").encode() + b"%%EOF\n"
+        Path(path).write_bytes(bytes(out))
+
+    #: A raised exponent, a dropped index, and a line of ordinary prose that
+    #: contains the characters a naive reader mistakes for scripts.
+    RUNS = (
+        ("E = mc", 72, 700, 12), ("2", 111, 705, 8),
+        ("H", 72, 670, 12), ("2", 80, 666, 8), ("O", 85, 670, 12),
+        ("The rate is 4 = 2 x 2, roughly.", 72, 640, 12),
+    )
+
+    def lines_of(self, runs=None):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "typeset.pdf"
+            self.typeset_pdf(source, runs or self.RUNS)
+            pages, _ = engine.pdfium_extract(source)
+            if not pages or pages[0].get("method") != "pdfium-native":
+                self.skipTest("PDFium is not available for extraction")
+            return pages[0]["native_text_lines"]
+
+    # -- the faces that only set mathematics -------------------------------
+
+    def test_a_face_that_only_sets_mathematics_is_recognised(self):
+        for face in ("CMMI10", "CMSY7", "MSBM10", "LatinModernMath-Regular", "STIXMath", "Cambria Math"):
+            self.assertTrue(engine.is_math_typeface(face), face)
+
+    def test_an_ordinary_face_is_not_a_mathematical_one(self):
+        for face in ("Times-Roman", "Helvetica", "TeXGyreTermes", "NimbusRomNo9L", "Arial-BoldMT", ""):
+            self.assertFalse(engine.is_math_typeface(face), face)
+
+    # -- reading the scripts -------------------------------------------------
+
+    def test_a_raised_smaller_character_is_a_superscript(self):
+        self.assertEqual(self.lines_of()[0]["typeset"], "E = mc ^{2}")
+
+    def test_a_dropped_smaller_character_is_a_subscript(self):
+        self.assertEqual(self.lines_of()[1]["typeset"], "H_{2}O")
+
+    def test_prose_is_returned_exactly_as_it_was_set(self):
+        """The defect this rules out: `=` inks high and small in every line."""
+        line = self.lines_of()[2]
+        self.assertEqual(line["typeset"], line["text"])
+        self.assertNotIn("^", line["typeset"])
+        self.assertNotIn("_", line["typeset"])
+
+    def test_a_character_the_page_only_sets_smaller_is_not_a_script(self):
+        """Size alone is not enough; it must leave the baseline as well."""
+        lines = self.lines_of(runs=(("BIG", 72, 700, 12), ("small", 100, 700, 8)))
+        self.assertEqual(lines[0]["typeset"], lines[0]["text"])
+
+    def test_a_line_with_nothing_to_measure_against_is_left_alone(self):
+        self.assertEqual(engine.measured_script_roles([]), [])
+        single = [{"character": "x", "bbox": None, "baseline": 700.0, "size": 12.0}]
+        self.assertEqual(engine.measured_script_roles(single), ["normal"])
+
+    def test_a_character_without_a_baseline_is_never_called_a_script(self):
+        characters = [
+            {"character": "x", "bbox": None, "baseline": None, "size": 12.0},
+            {"character": "2", "bbox": None, "baseline": None, "size": 8.0},
+        ]
+        self.assertEqual(engine.measured_script_roles(characters), ["normal", "normal"])
+
+    def test_consecutive_scripts_group_into_one_run(self):
+        characters = [
+            {"character": "x", "bbox": None, "baseline": 100.0, "size": 10.0},
+            {"character": "1", "bbox": None, "baseline": 104.0, "size": 6.0},
+            {"character": "2", "bbox": None, "baseline": 104.0, "size": 6.0},
+        ]
+        self.assertEqual(engine.typeset_from_characters(characters, "x12"), "x^{12}")
+
+    def test_a_line_that_sets_no_scripts_comes_back_identical(self):
+        characters = [
+            {"character": "a", "bbox": None, "baseline": 100.0, "size": 10.0},
+            {"character": "b", "bbox": None, "baseline": 100.0, "size": 10.0},
+        ]
+        self.assertEqual(engine.typeset_from_characters(characters, "ab"), "ab")
+
+    # -- what the scripts make of the block ----------------------------------
+
+    def test_the_measured_script_is_what_makes_it_a_formula(self):
+        """`E = mc2` carries one marker as characters and two once set down."""
+        self.assertNotEqual(engine.classify_block("E = mc 2")[0], "formula")
+        self.assertEqual(engine.classify_block("E = mc 2", typeset="E = mc ^{2}")[0], "formula")
+
+    def test_a_mathematical_face_is_enough_on_its_own(self):
+        self.assertEqual(engine.classify_block("α β γ", math_face=True)[0], "formula")
+        self.assertNotEqual(engine.classify_block("α β γ")[0], "formula")
+
+    def test_a_whole_paragraph_in_a_mathematical_face_is_not_one_formula(self):
+        long_run = "x " * (engine.FORMULA_FACE_CHARS // 2 + 20)
+        self.assertNotEqual(engine.classify_block(long_run, math_face=True)[0], "formula")
+
+    def test_the_formula_reaches_the_block_and_every_export(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "formula.pdf"
+            self.typeset_pdf(source, self.RUNS)
+            ir, _, _ = engine.make_ir(source, "Standard")
+            if ir["pages"][0]["method"] != "pdfium-native":
+                self.skipTest("PDFium is not available for extraction")
+            formula = next(block for block in ir["blocks"] if block["type"] == "formula")
+            self.assertEqual(formula["formula"]["typeset"], "E = mc ^{2}")
+            self.assertEqual(formula["formula"]["source"], "measured-script-geometry")
+            self.assertEqual(formula["evidence"]["findings"]["measured_script_count"], 1)
+            self.assertIn("E = mc ^{2}", engine.render_markdown(ir))
+            self.assertIn("E = mc ^{2}", engine.render_html(ir))
+
+    def test_a_block_the_page_set_no_scripts_in_carries_no_formula_record(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "plain.pdf"
+            self.typeset_pdf(source, (("A plain sentence about nothing.", 72, 700, 12),))
+            ir, _, _ = engine.make_ir(source, "Standard")
+            if ir["pages"][0]["method"] != "pdfium-native":
+                self.skipTest("PDFium is not available for extraction")
+            self.assertFalse([block for block in ir["blocks"] if block.get("formula")])
+
+    def test_a_formula_without_measured_scripts_still_renders_its_text(self):
+        self.assertEqual(engine.block_formula_text({"text": "a = b"}), "a = b")
+        self.assertEqual(
+            engine.block_formula_text({"text": "x 2", "formula": {"typeset": "x^{2}"}}), "x^{2}")
+
+
+class AutomaticRepairTest(unittest.TestCase):
+    """Philon may replace what it could not read, and must say that it did.
+
+    This is the one place extracted text is overwritten, so the tests are
+    mostly about what survives it: the source's own words, the reason, and the
+    route back. No model is run; the local runtime is mocked, because what is
+    under test is the policy around it rather than any model's reading.
+    """
+
+    @staticmethod
+    def ir_with_unreadable_block(escalate=True):
+        return {
+            "philon_ir_version": engine.IR_VERSION,
+            "document": {"source": {"path": "/tmp/x.pdf"}},
+            "pages": [{"id": "page-1", "number": 1, "width": 612, "height": 792}],
+            "blocks": [{
+                "id": "page-1-block-1", "page": "page-1", "type": "paragraph", "text": "sourc� text",
+                "bbox": {"x0": 10, "y0": 10, "x1": 100, "y1": 40,
+                         "coordinate_space": "pdf-page-points", "origin": "bottom-left"},
+                "source": {"method": "pdfium-native", "confidence": 0.4, "language": "und"},
+                "evidence": {"native_health": {"requires_escalation": escalate},
+                             "alternatives": [], "repair_history": [], "validation": []},
+            }],
+        }
+
+    def run_with_model(self, ir, text, mode_issues=False):
+        """Apply an automatic pass with the local runtime stubbed out."""
+        from unittest.mock import patch
+
+        pack = {"id": "qwen3.8-27b-local-repair", "approved": True,
+                "available_locally": True, "local_path": "/tmp/model"}
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "x.pdf"
+            source.write_bytes(b"%PDF-1.4\n%%EOF\n")
+            crop = Path(directory) / "crop.png"
+            crop.write_bytes(b"\x89PNG\r\n\x1a\n")
+            with patch.object(engine, "resolve_repair_pack", return_value=pack), \
+                 patch.object(engine, "repair_crop", return_value=crop), \
+                 patch.object(engine, "run_qwen38", return_value=(text, {"runtime": "stub"})):
+                return engine.apply_automatic_repairs(ir, source, Path(directory))
+
+    # -- what it acts on -------------------------------------------------
+
+    def test_it_acts_only_where_the_health_gate_already_refused(self):
+        readable = self.ir_with_unreadable_block(escalate=False)
+        self.assertEqual(engine.blocks_awaiting_repair(readable), [])
+        unreadable = self.ir_with_unreadable_block()
+        self.assertEqual(len(engine.blocks_awaiting_repair(unreadable)), 1)
+
+    def test_a_document_it_has_nothing_to_do_with_is_left_alone(self):
+        ir = self.ir_with_unreadable_block(escalate=False)
+        self.assertEqual(self.run_with_model(ir, "anything"), [])
+        self.assertEqual(ir["blocks"][0]["text"], "sourc� text")
+
+    def test_without_an_approved_model_nothing_is_changed_and_it_says_so(self):
+        from unittest.mock import patch
+
+        ir = self.ir_with_unreadable_block()
+        with patch.object(engine, "resolve_repair_pack", return_value=None):
+            findings = engine.apply_automatic_repairs(ir, Path("/tmp/x.pdf"), Path("/tmp"))
+        self.assertEqual([finding.code for finding in findings], ["AUTOMATIC_REPAIR_UNAVAILABLE"])
+        self.assertEqual(ir["blocks"][0]["text"], "sourc� text")
+
+    # -- what survives a replacement ---------------------------------------
+
+    def test_the_source_text_is_retained_before_it_is_replaced(self):
+        ir = self.ir_with_unreadable_block()
+        findings = self.run_with_model(ir, "source text")
+        block = ir["blocks"][0]
+        self.assertEqual(block["text"], "source text")
+        retained = [item for item in block["evidence"]["alternatives"] if item["kind"] == "native-source"]
+        self.assertEqual(len(retained), 1)
+        self.assertEqual(retained[0]["text"], "sourc� text")
+        self.assertIn("AUTOMATIC_REPAIR_APPLIED", [finding.code for finding in findings])
+
+    def test_the_replacement_records_which_model_made_it(self):
+        ir = self.ir_with_unreadable_block()
+        self.run_with_model(ir, "source text")
+        history = ir["blocks"][0]["evidence"]["repair_history"]
+        self.assertEqual(history[-1]["kind"], "automatic-local-ocr")
+        self.assertEqual(history[-1]["status"], "candidate-applied")
+        self.assertEqual(history[-1]["candidate_kind"], "qwen3.8-27b-local-repair")
+        self.assertIn("source_crop", history[-1])
+        self.assertEqual(ir["blocks"][0]["review"]["action"], "automatic_repair")
+        self.assertIn("automatic-local-repair-applied", ir["blocks"][0]["evidence"]["validation"])
+
+    def test_the_source_text_can_be_put_back(self):
+        """A replacement a reader disagrees with must be reversible."""
+        ir = self.ir_with_unreadable_block()
+        self.run_with_model(ir, "source text")
+        block = ir["blocks"][0]
+        index = next(position for position, item in enumerate(block["evidence"]["alternatives"])
+                     if item["kind"] == "native-source")
+        block["text"] = block["evidence"]["alternatives"][index]["text"]
+        self.assertEqual(block["text"], "sourc� text")
+
+    # -- what it refuses to apply -------------------------------------------
+
+    def test_a_candidate_that_fails_the_format_checks_is_never_applied(self):
+        """A model's reading with replacement glyphs is not an improvement."""
+        ir = self.ir_with_unreadable_block()
+        findings = self.run_with_model(ir, "still � broken")
+        block = ir["blocks"][0]
+        self.assertEqual(block["text"], "sourc� text")
+        self.assertIn("AUTOMATIC_REPAIR_WITHHELD", [finding.code for finding in findings])
+        self.assertEqual(block["evidence"]["repair_history"][-1]["status"], "candidate-withheld")
+        # ...and it is still retained, so a person can look at it.
+        self.assertEqual(len(block["evidence"]["alternatives"]), 1)
+        self.assertFalse(block["evidence"]["alternatives"][0]["selected"])
+
+    def test_an_empty_candidate_is_never_applied(self):
+        ir = self.ir_with_unreadable_block()
+        self.run_with_model(ir, "   ")
+        self.assertEqual(ir["blocks"][0]["text"], "sourc� text")
+
+    def test_a_runtime_that_fails_leaves_the_source_text_standing(self):
+        from unittest.mock import patch
+
+        ir = self.ir_with_unreadable_block()
+        pack = {"id": "qwen3.8-27b-local-repair", "approved": True,
+                "available_locally": True, "local_path": "/tmp/model"}
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "x.pdf"
+            source.write_bytes(b"%PDF-1.4\n%%EOF\n")
+            with patch.object(engine, "resolve_repair_pack", return_value=pack), \
+                 patch.object(engine, "repair_crop", side_effect=RuntimeError("no raster")):
+                findings = engine.apply_automatic_repairs(ir, source, Path(directory))
+        self.assertEqual([finding.code for finding in findings], ["AUTOMATIC_REPAIR_FAILED"])
+        self.assertEqual(ir["blocks"][0]["text"], "sourc� text")
+
+    # -- the gate on the pack itself ------------------------------------------
+
+    def test_only_an_approved_enabled_local_pack_is_ever_used(self):
+        from unittest.mock import patch
+
+        def status(approved=True, available=True, path="/tmp/model"):
+            return {"packs": [{"id": "qwen3.8-27b-local-repair", "approved": approved,
+                               "available_locally": available, "local_path": path}]}
+
+        with patch.object(engine, "model_status", return_value=status()):
+            self.assertIsNotNone(engine.resolve_repair_pack(None))
+            # ...but not one the person running it has switched off.
+            self.assertIsNone(engine.resolve_repair_pack(["olmocr-2-7b-local-candidate"]))
+        with patch.object(engine, "model_status", return_value=status(approved=False)):
+            self.assertIsNone(engine.resolve_repair_pack(None))
+        with patch.object(engine, "model_status", return_value=status(available=False)):
+            self.assertIsNone(engine.resolve_repair_pack(None))
+        with patch.object(engine, "model_status", return_value=status(path=None)):
+            self.assertIsNone(engine.resolve_repair_pack(None))
+
+    def test_a_run_that_did_not_ask_for_repair_never_gets_one(self):
+        """It is off unless asked for, and no profile turns it on."""
+        from unittest.mock import patch
+
+        with patch.object(engine, "apply_automatic_repairs") as repair:
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                source = root / "sample.pdf"
+                IrVersionTest.blank_pdf(source)
+                for profile in ("Fast", "Balanced", "Verified"):
+                    engine.convert_file(source, profile, root / "out", root / "cache",
+                                        outputs=["markdown"])
+        repair.assert_not_called()
+
+    def test_the_cap_bounds_one_pass_and_reports_what_it_left(self):
+        ir = self.ir_with_unreadable_block()
+        template = ir["blocks"][0]
+        ir["blocks"] = []
+        for index in range(engine.AUTOMATIC_REPAIR_MAX_BLOCKS + 3):
+            block = json.loads(json.dumps(template))
+            block["id"] = f"page-1-block-{index + 1}"
+            ir["blocks"].append(block)
+        findings = self.run_with_model(ir, "source text")
+        self.assertIn("AUTOMATIC_REPAIR_LIMITED", [finding.code for finding in findings])
+        repaired = [block for block in ir["blocks"] if block["text"] == "source text"]
+        self.assertEqual(len(repaired), engine.AUTOMATIC_REPAIR_MAX_BLOCKS)
 
 
 if __name__ == "__main__":
