@@ -42,11 +42,23 @@ jobs:
         with:
           path: philon_p
 
+      # A missing or expired token fails the checkout below with an error that
+      # names neither the secret nor the fix. Say it here instead, before the
+      # confusing one happens.
+      - name: Check the peer-repository token is present
+        env:
+          PEER_TOKEN: ${{ secrets.PHILON_PEER_TOKEN }}
+        run: |
+          if [ -z "${PEER_TOKEN}" ]; then
+            echo "::error::PHILON_PEER_TOKEN is not set on this repository. The parity gate needs to check out the private peer repository, which the built-in GITHUB_TOKEN cannot read. Create a fine-grained PAT with Contents: Read on both repositories and add it as PHILON_PEER_TOKEN here."
+            exit 1
+          fi
+
       # The source project, so the parity gate has something to compare
       # against. Both repositories are private, so this needs a token with
-      # read access to the other one, held as PHILON_PEER_TOKEN. Without it
-      # the checkout fails and the gate below reports what went unchecked.
-      - uses: actions/checkout@v7
+      # read access to the other one, held as PHILON_PEER_TOKEN.
+      - name: Check out the source project
+        uses: actions/checkout@v7
         with:
           repository: tsevis/philon
           token: ${{ secrets.PHILON_PEER_TOKEN }}

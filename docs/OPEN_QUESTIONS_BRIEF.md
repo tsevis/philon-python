@@ -167,7 +167,21 @@ be dead and a red or absent run means nothing. In order:
 3. Add a secret named `PHILON_PEER_TOKEN` to **both** repositories: a token with
    read access to the other one. Both are private, so the parity job's second
    checkout cannot succeed without it, and the job is deliberately written to
-   fail rather than skip when the peer is missing.
+   fail rather than skip when the peer is missing. This one does **not** depend
+   on the billing and can be done at any time. Create a fine-grained PAT at
+   <https://github.com/settings/personal-access-tokens/new>, scoped to
+   `tsevis/philon` and `tsevis/philon-python`, with **Contents: Read-only** and
+   nothing else, then:
+
+       gh secret set PHILON_PEER_TOKEN --repo tsevis/philon          # paste at the prompt
+       gh secret set PHILON_PEER_TOKEN --repo tsevis/philon-python   # the same token
+       gh secret list --repo tsevis/philon                           # confirm the name is there
+
+   Paste at the prompt rather than passing the value as an argument, so the
+   token does not land in shell history. Fine-grained tokens expire; when this
+   one does, the workflow fails at the guard step named
+   *Check the peer-repository token is present*, which says so in as many words
+   rather than failing inside `actions/checkout` with something opaque.
 
 Nothing is unprotected in the meantime, and no work needs to wait for it. Every
 gate the Linux job would run — including the parity gate, the one that matters
