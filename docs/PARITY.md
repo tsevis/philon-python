@@ -192,11 +192,21 @@ same failure the `cdn-lfs` allow-list had, and invisible for the same reason:
 every test of the fetch path mocks the fetch, so the suite exercises the loop and
 never the publisher.
 
-The consequence is bounded and the design is why. The digest check makes this
-fail closed: a person clicking Download on that pack gets an error, not the wrong
-weights. But the pack is declared `approved` and fetchable while being
-unfetchable, which is a claim the Models pane acts on — it offers a Download
-button that cannot succeed.
+**The consequence is narrower than it first looks, and the design is why.** On a
+machine that already holds the pack — this one does — discovery finds the local
+copy first and the pack reports `available_locally`, `readiness: ready`. The
+Download button is gated on `not available_locally`, so no button is offered and
+nothing is broken: the pack is usable right now. And where a fetch *is*
+attempted, the digest check makes it fail closed — an error, never the wrong
+weights.
+
+What is left is a machine that does **not** hold the pack: a fresh install, or a
+cleared HuggingFace cache. There, the pack is declared `approved` and fetchable
+while being unfetchable, and the Download button would appear and could not
+succeed. That case matters least for this particular pack, because the Gemma
+Terms of Use already block it from a distributed release — but it is exactly the
+case a release check should catch, which is why the tool below exists rather than
+a manifest edit.
 
 **Not fixed here, and deliberately.** `engine/model-manifest.json` is one of the
 five byte-identical files and `tests/parity_policy.py` holds it so; correcting it
@@ -211,9 +221,24 @@ a pack whose licence already blocks it from a distributed release.
 `docs/RELEASE.md` now runs it before a release. It touches the network, so it is
 deliberately **not** in `verify-release.sh`: every gate there passes offline, and
 a release gate that fails when a publisher is slow is one people learn to ignore.
-The other seven packs were left undownloaded — 24 GB whose remaining untested
-surface is streaming and hashing at 5-7 GB, against 520 MB already proven, which
-is a real gap but a much smaller one than the number suggests.
+### "Never downloaded" does not mean absent
+
+Worth stating flatly, because acting on the phrase without checking it is what
+produced the detour above. The brief records that seven of the eight fetchable
+packs "have never been downloaded". That means never fetched **through Philon's
+own fetcher**. It does not mean the files are missing, and they are not: all
+eight packs have complete local copies in the HuggingFace hub cache, every file
+matching its declared byte count exactly. That is how the manifest's digests came
+to be "computed from a real copy" in the first place, and the machine's own model
+inventory has recorded them since 2026-08-16.
+
+So the 24 GB those seven represent is not 24 GB of missing weights — it is 24 GB
+already on disk that Philon's fetcher has never been the one to place there.
+Re-downloading them would re-fetch files that are already present, and discovery
+would decline to offer the download anyway. The genuinely untested surface is
+narrower: streaming and hashing a single file at 5-7 GB, against 520 MB already
+proven. Exercising it properly needs an environment without the hub cache, which
+is a different and far cheaper experiment than moving 24 GB here.
 
 ## Process lifetime without a socket bridge
 
