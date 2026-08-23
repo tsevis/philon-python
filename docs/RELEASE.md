@@ -35,21 +35,31 @@
    vendored into source rather than installed as a package. The SBOM policy
    validates the components that are declared; it cannot see one that was never
    declared.
-5. Run the private corpus benchmark; archive its manifest, result, hardware and
+5. Run `.venv/bin/python tools/check-download-declarations.py`. It touches the
+   network and so is deliberately **not** in `verify-release.sh`, whose gates all
+   pass offline. Every SHA-256 and byte count in the manifest was computed from a
+   real copy, which makes it an accurate record of that copy and says nothing
+   about whether the publisher still serves the same bytes at the same name —
+   and nothing else checks, because every test of the fetch path mocks the fetch.
+   Fifteen files, a few kilobytes, no bodies read. A failure here means a person
+   clicking Download gets an error; the digest check makes that fail closed
+   rather than install the wrong weights, but a pack that cannot be fetched
+   should not be shipped as fetchable.
+6. Run the private corpus benchmark; archive its manifest, result, hardware and
    local model fingerprints. A recorded result names the documents it measured by
    filename, size and SHA-256, so "the same version-pinned corpus" is something a
    reader can check rather than something the runner asserts.
-6. Build the ad-hoc signed bundle with `zsh scripts/package-macos.sh` on an Apple
-   Silicon Mac. `zsh scripts/verify-release.sh --package` does steps 2 and 6
+7. Build the ad-hoc signed bundle with `zsh scripts/package-macos.sh` on an Apple
+   Silicon Mac. `zsh scripts/verify-release.sh --package` does steps 2 and 7
    together. Record what was built in `releases/README.md`.
-7. On a clean offline Apple Silicon test machine, exercise native PDF,
+8. On a clean offline Apple Silicon test machine, exercise native PDF,
    scanned/image OCR, repair-candidate, pause/recovery, and export flows. Install
    with `ditto`, never `cp -R`: `cp -R` does not preserve the bundle seal and
    `codesign --verify --deep --strict` then fails on a bundle that was fine
    before it was copied.
-8. Sign and notarize only in the owner-controlled release environment. Packaging
+9. Sign and notarize only in the owner-controlled release environment. Packaging
    deliberately produces an ad-hoc signed, un-notarized bundle so that it needs
    nothing secret; see `releases/README.md` for what that costs the person who
    downloads one.
-9. Publish no Marker/Docling comparison until the archived corpus supports the
+10. Publish no Marker/Docling comparison until the archived corpus supports the
    specific claim.

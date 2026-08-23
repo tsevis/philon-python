@@ -163,6 +163,58 @@ One, and it is a decision rather than a test:
   open question, and the only behaviour the source's suite covers that the port
   deliberately does not.
 
+## The download declarations went stale, and nothing could see it
+
+Acting on the advice to exercise the seven never-downloaded packs found
+something cheaper and worse than expected, so the plan changed on the evidence.
+
+All fifteen declared files are fetched from **one** host pair — the manifest
+declares `repository` plus `name`, and `model_fetch.resolved_download_url`
+builds every URL against `huggingface.co`, which redirects to `*.cdn.hf.co`.
+Seven packs are therefore not seven untested paths; they are one path with
+different payloads. What that path had never been asked is the cheap question:
+**does each declared file still exist, at the size the manifest claims?**
+
+Opening each URL through the fetcher's own allow-listed opener and reading only
+`Content-Length` answers it for fifteen files in a few kilobytes. Thirteen
+matched exactly. Two did not, both in `gemma-4-12b-local-candidate`:
+
+    gemma-4-12B-it-Q4_K_M.gguf        404 — the repository no longer offers
+                                      that quantisation at all. It now
+                                      publishes Q4_0, Q8_0 and BF16.
+    mmproj-gemma-4-12B-it-Q8_0.gguf   served 158,987,616 bytes;
+                                      the manifest declares 158,987,584.
+
+The manifest is not wrong about what it recorded. Both files are on this machine
+in the HuggingFace cache at exactly the declared byte counts, so the digests were
+computed from real copies as claimed. **Upstream changed underneath them** — the
+same failure the `cdn-lfs` allow-list had, and invisible for the same reason:
+every test of the fetch path mocks the fetch, so the suite exercises the loop and
+never the publisher.
+
+The consequence is bounded and the design is why. The digest check makes this
+fail closed: a person clicking Download on that pack gets an error, not the wrong
+weights. But the pack is declared `approved` and fetchable while being
+unfetchable, which is a claim the Models pane acts on — it offers a Download
+button that cannot succeed.
+
+**Not fixed here, and deliberately.** `engine/model-manifest.json` is one of the
+five byte-identical files and `tests/parity_policy.py` holds it so; correcting it
+in this repository alone would fail the gate and be refused by the pre-commit
+hook. It has to be corrected in both, and the source project is out of scope for
+this session. Someone also has to decide *what* the correction is — repoint the
+pack at `Q4_0` or `Q8_0` and record fresh digests from a real copy, or drop the
+pack's `download` block and leave it discoverable-only. Both are decisions about
+a pack whose licence already blocks it from a distributed release.
+
+`tools/check-download-declarations.py` is the repeatable form of the probe, and
+`docs/RELEASE.md` now runs it before a release. It touches the network, so it is
+deliberately **not** in `verify-release.sh`: every gate there passes offline, and
+a release gate that fails when a publisher is slow is one people learn to ignore.
+The other seven packs were left undownloaded — 24 GB whose remaining untested
+surface is streaming and hashing at 5-7 GB, against 520 MB already proven, which
+is a real gap but a much smaller one than the number suggests.
+
 ## Process lifetime without a socket bridge
 
 The source project's `engine/test_socket.py` covers auth, cancellation, and
