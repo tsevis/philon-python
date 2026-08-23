@@ -20,7 +20,7 @@ Both on `main`, clean, pushed, `main...origin/main`.
     cd philon    && npm run release:verify                             # exit 0
     cd philon_p  && PHILON_DATA_DIR=$(mktemp -d) zsh scripts/verify-release.sh   # exit 0
 
-Baselines: philon 106 workspace + 265 engine + 8 Rust, 5 policy gates;
+Baselines: philon 108 workspace + 265 engine + 8 Rust, 5 policy gates;
 philon_p 44 desktop + 244 engine/fuzz/bench, 5 policy gates, shell with 5
 agreeing views, zero `qt.qpa` font warnings. IR is at **0.5.0**. The model
 manifest declares **15 packs, 8 fetchable, 3 unapproved**.
