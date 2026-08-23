@@ -141,11 +141,26 @@ perform alone. The macOS job keeps everything that genuinely needs a Mac: the
 Apple Vision helper, the Tauri build, the packaged bundle. On Linux the two
 Vision integration tests skip, which is the honest result there.
 
-**Two things are owed by the owner, and cannot be done from here:**
+Pushing the new workflow proved both halves of the diagnosis. In
+`philon-python` the run was created, the job was reached, and it failed in three
+seconds on the same billing message — so the workflow is wired correctly and
+nothing but the account is stopping it. In `philon` **no run was created at
+all**, because both of that repository's workflows are `disabled_manually`:
+
+    gh api repos/tsevis/philon/actions/workflows --jq '.workflows[] | "\(.name) \(.state)"'
+    Package Philon  disabled_manually
+    Verify Philon   disabled_manually
+
+They were switched off, presumably after the billing failures started. That is a
+repository setting and was deliberately left alone.
+
+**Three things are owed by the owner, and cannot be done from here:**
 
 1. Clear the GitHub billing failure or raise the spending limit. Until then no
    job of either kind starts.
-2. Add a secret named `PHILON_PEER_TOKEN` to **both** repositories: a token with
+2. Re-enable `philon`'s two workflows, which are currently disabled — worth
+   doing only after (1), or they will simply resume failing at job start.
+3. Add a secret named `PHILON_PEER_TOKEN` to **both** repositories: a token with
    read access to the other one. Both are private, so the parity job's second
    checkout cannot succeed without it, and the job is deliberately written to
    fail rather than skip when the peer is missing.
