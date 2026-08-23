@@ -23,7 +23,7 @@ Both on `main`, clean, pushed, `main...origin/main`.
 Baselines: philon 104 workspace + 265 engine + 9 Rust, 5 policy gates;
 philon_p 44 desktop + 244 engine/fuzz/bench, 5 policy gates, shell with 5
 agreeing views, zero `qt.qpa` font warnings. IR is at **0.5.0**. The model
-manifest declares **15 packs, 8 fetchable, 3 unapproved**.
+manifest declares **15 packs, 7 fetchable, 3 unapproved**.
 
 `engine/philon_engine.py` must be identical in both repos except **one**
 documented hunk (a `RuntimeError` in an `except` tuple, commented in the source,
@@ -75,8 +75,19 @@ Both policy gates were extended to hold the module to the new property: they now
 fail if the module calls `urlopen`, if the refusing handler is absent, or if a
 parent domain is matched without the leading dot.
 
-**What is still owed:** nothing for this pack. The other seven fetchable packs
-have never been downloaded, and the largest is a great deal bigger than 520 MB.
+**What is still owed:** nothing for this pack. The other six fetchable packs have
+never been downloaded, and the largest is a great deal bigger than 520 MB.
+
+`gemma-4-12b-local-candidate` declared an eighth and no longer does. Its
+`gemma-4-12B-it-Q4_K_M.gguf` answers **404** on `ggml-org/gemma-4-12B-it-GGUF`,
+which now publishes Q4_0, Q8_0 and BF16 and no Q4_K_M at all — the repository
+changed its published quantisations after the local copy was fetched. The
+repository itself answers 200, so this is not a licence gate. The digest in the
+manifest is genuine: the HuggingFace blob store names blobs by their digest and
+the local file resolves to `1278394b…` at exactly the declared 7,381,382,048
+bytes. What expired is availability, not honesty, and no correction to the name
+can fix it. The `download` block is therefore gone and the pack is
+discovery-only, which is what was already true of it.
 
 ## 2. Seven licences are owner-confirmed, not verified — posture CONFIRMED
 

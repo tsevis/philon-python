@@ -256,29 +256,13 @@
       "role": "local VLM for repair of selected regions",
       "required": false,
       "approved": true,
-      "distribution": "user-managed-local-copy",
+      "distribution": "user-managed-local-copy; no download declared — the Q4_K_M build this pack was fetched from is no longer published in ggml-org/gemma-4-12B-it-GGUF (checked 2026-08-23: HTTP 404; the repository now ships Q4_0, Q8_0 and BF16). The local copy's digest is genuine and discovery still finds it; there is nothing honest to re-fetch it from.",
       "integrity": "Per-file SHA-256 declared below and verified on download",
       "license": "Gemma Terms of Use — NOT an OSI licence. Use is subject to Google's prohibited-use policy and the terms travel with any redistribution. Owner-authorized for private local use 2026-08-23; blocked from a distributed Philon release without legal review.",
       "runtime": "llama.cpp local CLI with multimodal projector",
       "discovery_paths": [
         "~/.cache/huggingface/hub/models--ggml-org--gemma-4-12B-it-GGUF/snapshots/*"
-      ],
-      "download": {
-        "repository": "ggml-org/gemma-4-12B-it-GGUF",
-        "revision": "main",
-        "files": [
-          {
-            "name": "gemma-4-12B-it-Q4_K_M.gguf",
-            "sha256": "1278394b693672ac2799eadc9a83fd98259a6a88a40acfb1dcaa6c6fc895a606",
-            "bytes": 7381382048
-          },
-          {
-            "name": "mmproj-gemma-4-12B-it-Q8_0.gguf",
-            "sha256": "b486d28398a398db4fa14cc4b032252ad3a8d7f950b9fabd93f5c8b4d4dde52b",
-            "bytes": 158987584
-          }
-        ]
-      }
+      ]
     },
     {
       "id": "minicpm-v-4.6-local-candidate",

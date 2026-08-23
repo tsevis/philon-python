@@ -51,7 +51,7 @@ worse than no hook.
 | PDF/image safety preflight | Implemented and verified | Canonical bounded preflight rejects invalid, empty, encrypted, oversized, malformed, multi-frame and decompression-bomb inputs. |
 | Native PDF/OCR adaptive routing | Implemented; Apple Vision runtime gated | Canonical PDFium extraction, native-text health, per-page routes and adaptive DPI retained. Packaged macOS build compiles the Apple Vision helper; runtime is explicitly unavailable without it. |
 | Evidence and source provenance | Implemented and verified | Block IDs, coordinates, confidence, route, warnings, alternatives, repair history, source crops, overlay exports and manifests retained. |
-| Model provisioning | Implemented in both; first-run prompt source-only | Fifteen declared packs, eight of them fetchable. Discovery finds a copy already on the machine first — across the HuggingFace hub cache, the app-local stores and Philon's own managed store — and only offers to download what is genuinely absent. Every declared file carries a SHA-256 computed from a real copy, so a download is checked against known-good bytes rather than against whatever a host serves. **The first-run prompt is source-only.** Until 2026-08-23 this row claimed that first launch opens the Models pane, reports what it found, and records that it did. It does not, and never did: the port has no `modelSetupSeen` equivalent and starts on the workspace on a fresh `PHILON_DATA_DIR`, which was confirmed by constructing the shell against an empty one. `model_setup_summary` exists and is correct, but it is read only in the Models pane's own heading, where a person has already navigated. **Decided 2026-08-23: the port does not gain the prompt.** The Models pane already carries the correct summary one click away, and seven of the eight fetchable packs have never been downloaded while seven licences are owner-confirmed rather than model-card verified. Steering people toward fetching packs is close to the last thing to encourage while those debts stand. Recorded as a deliberate divergence rather than a debt, to be revisited if distribution becomes real. |
+| Model provisioning | Implemented in both; first-run prompt source-only | Fifteen declared packs, seven of them fetchable. Discovery finds a copy already on the machine first — across the HuggingFace hub cache, the app-local stores and Philon's own managed store — and only offers to download what is genuinely absent. Every declared file carries a SHA-256 computed from a real copy, so a download is checked against known-good bytes rather than against whatever a host serves. **The first-run prompt is source-only.** Until 2026-08-23 this row claimed that first launch opens the Models pane, reports what it found, and records that it did. It does not, and never did: the port has no `modelSetupSeen` equivalent and starts on the workspace on a fresh `PHILON_DATA_DIR`, which was confirmed by constructing the shell against an empty one. `model_setup_summary` exists and is correct, but it is read only in the Models pane's own heading, where a person has already navigated. **Decided 2026-08-23: the port does not gain the prompt.** The Models pane already carries the correct summary one click away, and six of the seven fetchable packs have never been downloaded while seven licences are owner-confirmed rather than model-card verified. Steering people toward fetching packs is close to the last thing to encourage while those debts stand. Recorded as a deliberate divergence rather than a debt, to be revisited if distribution becomes real. |
 | Philon IR version | 0.5.0 in both | The one number the two projects may not drift on: it names the evidence shape a consumer reads, and `validate_ir` refuses any other. 0.5.0 added the merged cells a table's missing rules prove, the formula a page's own script geometry proves, and the provenance an automatic local repair leaves behind; 0.4.0 had added the tables recovered from the rules a page draws; 0.3.0 had added the page's own `/Rotate`, the source-declared links measured onto each block, and the page selection a conversion covers. A cache entry is named after the IR version it holds, so an entry written against an older shape is never reached rather than read and rejected. |
 | Rotated pages, running heads, source links, page ranges, ruled tables, formulas, automatic repair | Implemented in both | Eight engine changes carried identically in each copy. A rotated page is measured in the frame it is displayed in, rather than page size with `/Rotate` applied and text rectangles without it. A running head carrying its folio is recognised as repeating. Link annotations are measured onto the characters they cover, and only http, https and mailto become clickable. A job converts a page range, which is part of the cache key and the export directory name. A table the page rules is recovered from those rules and exported as a real table, and rules are classified only after the rectangle is moved into the displayed frame, so a quarter-turned table does not arrive transposed. A rule that stops is read as the merged cell it leaves, a table continued onto the next page is recognised by the columns it repeats rather than a heading it does not, and a formula is recognised from the baselines and sizes the page measurably set. Automatic local repair is off unless a run asks for it, retains the extracted text beside every replacement, and refuses a candidate that fails the format checks. `diff` over the two engine copies still reports one hunk. |
 | IR 0.5.0 evidence in the interface | Implemented | The page-selection control asks for a range the engine already converts, refusing a malformed one before a job starts; the evidence summary reports the page's own rotation, the source-declared links measured onto the selected block including a target withheld as unanchorable, the tables recovered from the page's rules including the cells their missing rules merged, and what the page's script geometry made of the block — each counting what it could not recover rather than hiding it. |
@@ -208,14 +208,22 @@ Terms of Use already block it from a distributed release — but it is exactly t
 case a release check should catch, which is why the tool below exists rather than
 a manifest edit.
 
-**Not fixed here, and deliberately.** `engine/model-manifest.json` is one of the
-five byte-identical files and `tests/parity_policy.py` holds it so; correcting it
-in this repository alone would fail the gate and be refused by the pre-commit
-hook. It has to be corrected in both, and the source project is out of scope for
-this session. Someone also has to decide *what* the correction is — repoint the
-pack at `Q4_0` or `Q8_0` and record fresh digests from a real copy, or drop the
-pack's `download` block and leave it discoverable-only. Both are decisions about
-a pack whose licence already blocks it from a distributed release.
+**Fixed 2026-08-23, in both repositories at once.** The decision this section left
+open was taken: the pack's `download` block is **dropped** and the pack is
+discovery-only. Repointing it at `Q4_0` or `Q8_0` was the alternative and was
+rejected — an honest digest has to be computed from a real copy, and acquiring
+6.9 GB to make a pack fetchable that its own licence blocks from distribution buys
+nothing. The removal says why in the entry's `distribution` field rather than
+disappearing quietly, and the manifest's own standard is preserved: what expired
+here is availability, not honesty. The digest was and remains genuine — the
+HuggingFace blob store names blobs by their digest, and the local file resolves to
+`1278394b…` at exactly the declared 7,381,382,048 bytes.
+
+The manifest is one of the five byte-identical files, so this could not be done
+from either side alone; `tests/parity_policy.py` and the pre-commit hook refused
+it until both copies matched, which is the gate behaving as intended. The declared
+download blocks go from eight to seven, covering thirteen files rather than
+fifteen.
 
 `tools/check-download-declarations.py` is the repeatable form of the probe, and
 `docs/RELEASE.md` now runs it before a release. It touches the network, so it is
@@ -224,15 +232,16 @@ a release gate that fails when a publisher is slow is one people learn to ignore
 ### "Never downloaded" does not mean absent
 
 Worth stating flatly, because acting on the phrase without checking it is what
-produced the detour above. The brief records that seven of the eight fetchable
-packs "have never been downloaded". That means never fetched **through Philon's
-own fetcher**. It does not mean the files are missing, and they are not: all
-eight packs have complete local copies in the HuggingFace hub cache, every file
+produced the detour above. The brief records that six of the seven fetchable
+packs "have never been downloaded" — seven of the eight, before gemma's block was
+dropped. That means never fetched **through Philon's own fetcher**. It does not
+mean the files are missing, and they are not: all eight of those packs, gemma
+included, have complete local copies in the HuggingFace hub cache, every file
 matching its declared byte count exactly. That is how the manifest's digests came
 to be "computed from a real copy" in the first place, and the machine's own model
 inventory has recorded them since 2026-08-16.
 
-So the 24 GB those seven represent is not 24 GB of missing weights — it is 24 GB
+So the 24 GB those packs represent is not 24 GB of missing weights — it is 24 GB
 already on disk that Philon's fetcher has never been the one to place there.
 Re-downloading them would re-fetch files that are already present, and discovery
 would decline to offer the download anyway. The genuinely untested surface is
