@@ -1,6 +1,6 @@
 {
   "schema_version": "1.3",
-  "policy": "Default releases require commercially-safe packs. This private local installation may manually use user-authorized local packs, always retaining unselected evidence candidates. A pack may declare a `download` block; Philon fetches it only on an explicit request, only over HTTPS to an allow-listed host, only when the pack is approved, and only if every file matches the SHA-256 recorded here. Licences marked owner-confirmed were authorized by the installation owner rather than verified against an upstream model card, and packs whose licence restricts redistribution say so in their own entry.",
+  "policy": "Default releases require commercially-safe packs. This private local installation may manually use user-authorized local packs, always retaining unselected evidence candidates. A pack may declare a `download` block; Philon fetches it only on an explicit request, only over HTTPS to an allow-listed host, only when the pack is approved, and only if every file matches the SHA-256 recorded here. Licences marked owner-confirmed were authorized by the installation owner rather than verified against an upstream model card, and packs whose licence restricts redistribution say so in their own entry. The owner re-confirmed this approval set on 2026-08-23, including the two restricted packs, for private local use only; each of the owner-confirmed seven still needs a real model-card check before Philon is distributed to anyone.",
   "packs": [
     {
       "id": "apple-vision-ocr",

@@ -9,7 +9,10 @@ makes stays worth something:
 * It lives in its own module. The conversion engine never imports it at module
   scope, so a conversion cannot reach the network even by accident.
 * It speaks only to an explicit host allow-list, only over HTTPS, and it
-  re-checks every redirect hop rather than trusting the first URL.
+  re-checks every redirect hop rather than trusting the first URL. It follows
+  those hops itself, on an opener built to refuse to follow them, because an
+  opener that follows a redirect returns the final response and leaves the
+  allow-list covering nothing but the URL that was asked for.
 * It writes nothing until the bytes hash to the digest the manifest declares.
   A file that does not match is discarded, not installed.
 * It refuses any pack the model policy has not approved, so the licence gate
@@ -34,14 +37,29 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
-#: The only hosts Philon will open a connection to, ever. HuggingFace serves
-#: model blobs from a separate CDN and redirects to it, so both are named here;
-#: a redirect anywhere else is refused rather than followed.
+#: The only hosts Philon will open a connection to by name. Matched exactly and
+#: case-folded: a suffix test would accept `huggingface.co.example.invalid`,
+#: which is a different host entirely.
 MODEL_HOST_ALLOWLIST = (
     "huggingface.co",
     "cdn-lfs.huggingface.co",
     "cdn-lfs-us-1.huggingface.co",
     "cdn-lfs-eu-1.huggingface.co",
+)
+
+#: HuggingFace no longer serves large files from the `cdn-lfs` hosts above. It
+#: serves them from Xet storage, on a CDN host named for the region the client
+#: resolves to -- `us.aws.cdn.hf.co`, `eu-west-1.aws.cdn.hf.co` and so on. That
+#: set cannot be enumerated from here and has already changed once, so these
+#: parent domains are named instead and any host beneath one of them is allowed.
+#:
+#: The leading dot below is the whole safety of this. `host.endswith(".cdn.hf.co")`
+#: is false for `cdn.hf.co.example.invalid`, which is exactly what an unanchored
+#: suffix test would have accepted. The bare parent matches too, and nothing else
+#: does. This is a second registrable domain, and naming it is a deliberate
+#: widening of the allow-list rather than an accident of matching.
+MODEL_HOST_ALLOWED_PARENTS = (
+    "cdn.hf.co",
 )
 
 #: How many redirects a single file may take before Philon stops following.
@@ -59,10 +77,11 @@ class ModelFetchError(RuntimeError):
 
 
 def is_allowed_url(url: str) -> bool:
-    """Whether one URL is HTTPS and points at a host on the allow-list.
+    """Whether one URL is HTTPS and points at a host Philon will speak to.
 
-    Host comparison is exact and case-folded. A suffix match would accept
-    `huggingface.co.example.invalid`, which is a different host entirely.
+    A host is allowed if it is named exactly on `MODEL_HOST_ALLOWLIST`, or if it
+    sits beneath one of the `MODEL_HOST_ALLOWED_PARENTS` -- matched as the bare
+    parent or with a dot in front of it, never as a bare suffix.
     """
     try:
         parsed = urllib.parse.urlsplit(str(url))
@@ -71,7 +90,9 @@ def is_allowed_url(url: str) -> bool:
     if parsed.scheme.lower() != "https":
         return False
     host = (parsed.hostname or "").lower()
-    return host in MODEL_HOST_ALLOWLIST
+    if host in MODEL_HOST_ALLOWLIST:
+        return True
+    return any(host == parent or host.endswith("." + parent) for parent in MODEL_HOST_ALLOWED_PARENTS)
 
 
 def resolved_download_url(repository: str, filename: str, revision: str = "main") -> str:
@@ -81,23 +102,52 @@ def resolved_download_url(repository: str, filename: str, revision: str = "main"
     return f"https://huggingface.co/{repo}/resolve/{urllib.parse.quote(revision)}/{name}"
 
 
+class _RefuseRedirects(urllib.request.HTTPRedirectHandler):
+    """Stop urllib following redirects, so `_open_checked` can see each hop.
+
+    Returning `None` from `redirect_request` makes urllib fall through to its
+    default error handler, which raises the 3xx as an `HTTPError` carrying the
+    original `Location` header. That is what `_open_checked` reads.
+
+    This class is the load-bearing part of the redirect policy, and it was
+    missing. `urllib.request.urlopen` installs a redirect handler that follows
+    hops itself and returns only the final response, so the manual loop below
+    was unreachable and the allow-list was applied to the first URL and nothing
+    else. A real fetch proved it: asking for a pack file on `huggingface.co`
+    returned a 200 from `us.aws.cdn.hf.co`, a host `is_allowed_url` refuses, and
+    nothing in the path had looked. Every test mocked `_open_checked` itself, so
+    the suite exercised the loop and never the opener that bypassed it.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: D102 - urllib's own contract
+        return None
+
+
+def _opener() -> urllib.request.OpenerDirector:
+    """An opener that verifies certificates and follows nothing by itself."""
+    return urllib.request.build_opener(
+        urllib.request.HTTPSHandler(context=ssl.create_default_context()),
+        _RefuseRedirects,
+    )
+
+
 def _open_checked(url: str) -> Any:
     """Open a URL, checking every redirect hop against the allow-list.
 
-    Redirects are followed by hand rather than by the default opener, because
-    the default one would happily follow a redirect off the allow-list and the
-    check would then only ever have covered the first URL.
+    Redirects are followed by hand, on an opener built to refuse to follow them
+    itself, because an opener that follows them would return the final response
+    and the check would then only ever have covered the first URL.
     """
     current = url
+    opener = _opener()
     for _ in range(MAX_REDIRECTS + 1):
         if not is_allowed_url(current):
             raise ModelFetchError(
                 f"Refused a model URL that is not HTTPS on an allowed host: {current}"
             )
         request = urllib.request.Request(current, headers={"User-Agent": "Philon-local-model-fetch"})
-        context = ssl.create_default_context()
         try:
-            response = urllib.request.urlopen(request, timeout=60, context=context)  # noqa: S310 - allow-listed above
+            response = opener.open(request, timeout=60)  # noqa: S310 - allow-listed above
         except urllib.error.HTTPError as error:
             if error.code in (301, 302, 303, 307, 308) and error.headers.get("Location"):
                 current = urllib.parse.urljoin(current, error.headers["Location"])

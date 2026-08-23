@@ -1,0 +1,87 @@
+name: Verify Philon (Python)
+
+# What this can honestly check on a Linux runner, and nothing beyond it.
+#
+# The Qt desktop suite, the Apple Vision helper and the macOS package are not
+# here: PySide6 is not installed, and a GUI job on this runner would be
+# theatre. What is here is the part that is pure Python and pure policy -- the
+# conversion engine, the fuzz and benchmark suites, the five gates -- plus the
+# one check neither repository can perform alone.
+#
+# Linux minutes bill at 1x where macOS bills at 10x, which is the reason this
+# job exists separately from a local `scripts/verify-release.sh` run.
+
+on:
+  push:
+    branches: ["**"]
+    paths-ignore:
+      - "**/*.md"
+      - "docs/**"
+      - "documents/**"
+      - "LICENSE"
+      - ".gitignore"
+  # Spelled out twice rather than shared through a YAML anchor: GitHub's
+  # workflow parser does not support anchors.
+  pull_request:
+    paths-ignore:
+      - "**/*.md"
+      - "docs/**"
+      - "documents/**"
+      - "LICENSE"
+      - ".gitignore"
+
+concurrency:
+  group: verify-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  engine-and-policy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: philon_p
+
+      # The source project, so the parity gate has something to compare
+      # against. Both repositories are private, so this needs a token with
+      # read access to the other one, held as PHILON_PEER_TOKEN. Without it
+      # the checkout fails and the gate below reports what went unchecked.
+      - uses: actions/checkout@v7
+        with:
+          repository: tsevis/philon
+          token: ${{ secrets.PHILON_PEER_TOKEN }}
+          path: philon
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.10"
+
+      - name: Install the engine's dependencies
+        working-directory: philon_p
+        run: |
+          python3 -m venv .venv
+          # Every runtime pin except PySide6, taken from the one file that
+          # declares them, because this job runs no interface.
+          .venv/bin/pip install $(grep -v -e '^#' -e '^$' -e '^PySide6' requirements.txt | tr '\n' ' ')
+
+      - name: Engine, fuzz and benchmark suites
+        working-directory: philon_p
+        run: .venv/bin/python -m unittest engine/test_engine.py engine/test_fuzz.py bench/test_run.py -v
+
+      - name: Policy gates
+        working-directory: philon_p
+        run: |
+          .venv/bin/python tests/local_only_policy.py
+          .venv/bin/python tests/model_fetch_policy.py
+          .venv/bin/python tests/license_policy.py
+          .venv/bin/python tests/sbom_policy.py
+
+      # The check neither repository can run on its own. Skipping is a failure
+      # here: a parity gate that passes without a peer to compare against is
+      # indistinguishable from one that compared and was satisfied.
+      - name: Engine parity against the source project
+        working-directory: philon_p
+        env:
+          PHILON_PARITY_PEER: ${{ github.workspace }}/philon
+          PHILON_PARITY_REQUIRE: "1"
+        run: .venv/bin/python tests/parity_policy.py
