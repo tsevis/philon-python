@@ -13,7 +13,7 @@ The application is local-first and offline by default. It has no cloud providers
 - A page preview with page navigation, fit/actual-size controls, selected-block source-region overlays, block review/editing, retained candidates, and source-crop opening for manual repair candidates
 - An evidence summary that reports, per selected block, its source method, confidence, route, measured region, the page's own rotation, and the links the source declared — including a target withheld because its scheme is not one Philon will make clickable.
 - SQLite-backed history, settings, persistent/recoverable batch queues, pause-after-current, cancellation of pending work, retry, cross-document review through the Library, and collision-safe export copying.
-- Explicit model licence/readiness gates. User-managed Qwen 3.8 and olmOCR candidates remain manual-only; BGE-M3 is only requested by Verified conversion and never silently fabricates vectors.
+- Explicit model licence/readiness gates. User-managed Qwen 3.8 and olmOCR candidates are manual unless a run explicitly asks for automatic repair, which acts only where the health gate already refused to vouch for the text and retains the extracted words beside every replacement; BGE-M3 is only requested by Verified conversion and never silently fabricates vectors.
 - A private-corpus benchmark harness that records cold/warm timing, cache state, output contracts, private gold metrics, and isolated external comparators.
 
 ## Run locally

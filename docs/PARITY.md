@@ -40,7 +40,7 @@ the two copies is the check that says whether that happened.
 | Output formats | Implemented and verified | Markdown, semantic HTML, IR, page-tree interchange JSON, chunks, optional embeddings, image assets, CSV, evidence and manifest. |
 | Source/output/review UI | Implemented and smoke-tested | Fit/actual-size, zoomable source preview, page navigation, PDF/normalized-image overlays, block selection, in-app edit, candidate restore, repair request and crop access. |
 | Persistent batch behavior | Implemented and verified | SQLite queue survives process restart, recovers interrupted running item, supports pause-after-current, cancel pending, retry, resume and export completed bundles. |
-| Local model governance | Implemented and verified | Canonical manifest, approval/integrity/licence gates, offline discovery/readiness, manual-only Qwen/olmOCR, optional BGE-M3 sidecar. |
+| Local model governance | Implemented and verified | Canonical manifest, approval/integrity/licence gates, offline discovery/readiness, optional BGE-M3 sidecar. Qwen/olmOCR repair is manual unless a run explicitly asks for an automatic pass, which retains the extracted text beside every replacement. The Qwen 2.5 VL **3B** copy is blocked on its Research Licence; that is specific to the checkpoint, not the family. |
 | Benchmark harness | Implemented and verified | Canonical cold/warm cache timing, contract checks, private-gold metrics and isolated comparator execution. |
 | Local-only, licence, SBOM, fuzz/release checks | Implemented and verified | Python policy scripts, CycloneDX SBOM, engine fuzz tests and macOS package script. The SBOM policy requires a resolved version and a declared distribution for every component, and fails if a runtime requirement is undeclared. |
 
