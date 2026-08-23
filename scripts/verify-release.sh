@@ -12,7 +12,14 @@ if [[ ! -x "${VENV}/bin/python" ]]; then
 fi
 PYTHON="${VENV}/bin/python"
 
-"${PYTHON}" -m unittest discover -s tests -v
+# Counted and echoed, not just run. Every number this script states is one a
+# document can be checked against; the desktop count was the one it did not
+# state, and docs/PARITY.md drifted to a stale 42 without anything noticing.
+DESKTOP_LOG="$(mktemp)"
+"${PYTHON}" -m unittest discover -s tests -v 2>&1 | tee "${DESKTOP_LOG}"
+# BSD sed has no \? in a basic regex, so the plural is matched with .* instead.
+DESKTOP_TESTS="$(sed -n 's/^Ran \([0-9][0-9]*\) test.* in .*/\1/p' "${DESKTOP_LOG}" | tail -1)"
+rm -f "${DESKTOP_LOG}"
 # Build the Apple Vision helper before the engine suite runs, so the two
 # integration tests execute rather than skipping. The source project does the
 # same, and without it a local run is quietly weaker than the one it mirrors.
@@ -67,6 +74,7 @@ if not views == names == tabs:
 window.close()
 print(f"Native shell constructed off-screen with {views} agreeing views.")
 PYTHON
+echo "Desktop suite: ${DESKTOP_TESTS} tests, all off-screen."
 if [[ "${1:-}" == "--package" ]]; then
   zsh scripts/package-macos.sh
 fi

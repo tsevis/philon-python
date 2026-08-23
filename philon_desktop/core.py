@@ -23,7 +23,60 @@ from engine import philon_engine as engine
 PROFILES = ("Fast", "Balanced", "Verified")
 OUTPUTS = ("machine", "markdown", "html", "ir", "chunks", "evidence", "table_csv", "assets", "manifest", "page_tree")
 DEFAULT_OUTPUTS = tuple(output for output in OUTPUTS if output != "page_tree")
+CACHE_POLICIES = ("use", "refresh", "bypass")
 TERMINAL_STATES = {"completed", "completed_with_warnings", "failed", "cancelled"}
+
+
+def default_preferences() -> dict[str, Any]:
+    """A fresh copy every call.
+
+    The lists are rebuilt rather than shared, so a caller that mutates what it
+    was handed cannot reach back into the defaults every later caller reads.
+    """
+    return {"profile": "Balanced", "cache_policy": "use",
+            "outputs": list(DEFAULT_OUTPUTS), "enabled_model_ids": []}
+
+
+def sanitize_preferences(values: Any) -> dict[str, Any]:
+    """What a stored preference set means to *this* build.
+
+    Validation on write is not enough on its own. The output list and the
+    profile names are part of the build, and they change: `page_tree` was added
+    to `OUTPUTS`, and a database written by an older Philon holds whatever that
+    build offered. Read the stored value through this and a name this build no
+    longer has is dropped at the boundary rather than handed to the engine.
+
+    Anything unrecognised falls back to the documented default rather than
+    raising. A stored preference that cannot be read is a reason to start from
+    the defaults, not a reason the application will not open.
+    """
+    defaults = default_preferences()
+    if not isinstance(values, dict):
+        return defaults
+
+    profile = values.get("profile")
+    if profile not in PROFILES:
+        profile = defaults["profile"]
+
+    cache_policy = values.get("cache_policy")
+    if cache_policy not in CACHE_POLICIES:
+        cache_policy = defaults["cache_policy"]
+
+    stored_outputs = values.get("outputs")
+    outputs = ([output for output in OUTPUTS if output in stored_outputs]
+               if isinstance(stored_outputs, list) else [])
+    # Emitting nothing is not a conversion, so an empty selection -- however it
+    # came to be empty -- is the defaults rather than an engine call producing
+    # no file. Kept in this build's canonical order, not the order stored.
+    if not outputs:
+        outputs = defaults["outputs"]
+
+    stored_ids = values.get("enabled_model_ids")
+    enabled_model_ids = ([value for value in stored_ids if isinstance(value, str)]
+                         if isinstance(stored_ids, list) else [])
+
+    return {"profile": profile, "cache_policy": cache_policy,
+            "outputs": outputs, "enabled_model_ids": enabled_model_ids}
 
 
 def utc_now() -> str:
@@ -235,14 +288,14 @@ class PhilonService:
         engine.VISION_HELPER = bundled_helper if bundled_helper.exists() else None
 
     def preferences(self) -> dict[str, Any]:
-        return self.store.setting("preferences", {"profile": "Balanced", "cache_policy": "use", "outputs": list(DEFAULT_OUTPUTS), "enabled_model_ids": []})
+        return sanitize_preferences(self.store.setting("preferences", None))
 
     def save_preferences(self, values: dict[str, Any]) -> None:
         profile = values.get("profile", "Balanced")
         outputs = values.get("outputs", list(DEFAULT_OUTPUTS))
         enabled_model_ids = values.get("enabled_model_ids", [])
         valid_models = isinstance(enabled_model_ids, list) and all(isinstance(item, str) for item in enabled_model_ids)
-        if profile not in PROFILES or values.get("cache_policy", "use") not in {"use", "refresh", "bypass"} or not isinstance(outputs, list) or not outputs or not valid_models:
+        if profile not in PROFILES or values.get("cache_policy", "use") not in CACHE_POLICIES or not isinstance(outputs, list) or not outputs or not valid_models:
             raise ValueError("Preferences contain an unsupported profile, cache policy, model list, or empty output selection.")
         self.store.save_setting("preferences", values)
 

@@ -51,7 +51,7 @@ worse than no hook.
 | PDF/image safety preflight | Implemented and verified | Canonical bounded preflight rejects invalid, empty, encrypted, oversized, malformed, multi-frame and decompression-bomb inputs. |
 | Native PDF/OCR adaptive routing | Implemented; Apple Vision runtime gated | Canonical PDFium extraction, native-text health, per-page routes and adaptive DPI retained. Packaged macOS build compiles the Apple Vision helper; runtime is explicitly unavailable without it. |
 | Evidence and source provenance | Implemented and verified | Block IDs, coordinates, confidence, route, warnings, alternatives, repair history, source crops, overlay exports and manifests retained. |
-| Model provisioning | Implemented in both; first-run prompt source-only | Fifteen declared packs, eight of them fetchable. Discovery finds a copy already on the machine first — across the HuggingFace hub cache, the app-local stores and Philon's own managed store — and only offers to download what is genuinely absent. Every declared file carries a SHA-256 computed from a real copy, so a download is checked against known-good bytes rather than against whatever a host serves. **The first-run prompt is source-only.** Until 2026-08-23 this row claimed that first launch opens the Models pane, reports what it found, and records that it did. It does not, and never did: the port has no `modelSetupSeen` equivalent and starts on the workspace on a fresh `PHILON_DATA_DIR`, which was confirmed by constructing the shell against an empty one. `model_setup_summary` exists and is correct, but it is read only in the Models pane's own heading, where a person has already navigated. Whether the port should gain the prompt is the owner's call; what is fixed here is the record. |
+| Model provisioning | Implemented in both; first-run prompt source-only | Fifteen declared packs, eight of them fetchable. Discovery finds a copy already on the machine first — across the HuggingFace hub cache, the app-local stores and Philon's own managed store — and only offers to download what is genuinely absent. Every declared file carries a SHA-256 computed from a real copy, so a download is checked against known-good bytes rather than against whatever a host serves. **The first-run prompt is source-only.** Until 2026-08-23 this row claimed that first launch opens the Models pane, reports what it found, and records that it did. It does not, and never did: the port has no `modelSetupSeen` equivalent and starts on the workspace on a fresh `PHILON_DATA_DIR`, which was confirmed by constructing the shell against an empty one. `model_setup_summary` exists and is correct, but it is read only in the Models pane's own heading, where a person has already navigated. **Decided 2026-08-23: the port does not gain the prompt.** The Models pane already carries the correct summary one click away, and seven of the eight fetchable packs have never been downloaded while seven licences are owner-confirmed rather than model-card verified. Steering people toward fetching packs is close to the last thing to encourage while those debts stand. Recorded as a deliberate divergence rather than a debt, to be revisited if distribution becomes real. |
 | Philon IR version | 0.5.0 in both | The one number the two projects may not drift on: it names the evidence shape a consumer reads, and `validate_ir` refuses any other. 0.5.0 added the merged cells a table's missing rules prove, the formula a page's own script geometry proves, and the provenance an automatic local repair leaves behind; 0.4.0 had added the tables recovered from the rules a page draws; 0.3.0 had added the page's own `/Rotate`, the source-declared links measured onto each block, and the page selection a conversion covers. A cache entry is named after the IR version it holds, so an entry written against an older shape is never reached rather than read and rejected. |
 | Rotated pages, running heads, source links, page ranges, ruled tables, formulas, automatic repair | Implemented in both | Eight engine changes carried identically in each copy. A rotated page is measured in the frame it is displayed in, rather than page size with `/Rotate` applied and text rectangles without it. A running head carrying its folio is recognised as repeating. Link annotations are measured onto the characters they cover, and only http, https and mailto become clickable. A job converts a page range, which is part of the cache key and the export directory name. A table the page rules is recovered from those rules and exported as a real table, and rules are classified only after the rectangle is moved into the displayed frame, so a quarter-turned table does not arrive transposed. A rule that stops is read as the merged cell it leaves, a table continued onto the next page is recognised by the columns it repeats rather than a heading it does not, and a formula is recognised from the baselines and sizes the page measurably set. Automatic local repair is off unless a run asks for it, retains the extracted text beside every replacement, and refuses a candidate that fails the format checks. `diff` over the two engine copies still reports one hunk. |
 | IR 0.5.0 evidence in the interface | Implemented | The page-selection control asks for a range the engine already converts, refusing a malformed one before a job starts; the evidence summary reports the page's own rotation, the source-declared links measured onto the selected block including a target withheld as unanchorable, the tables recovered from the page's rules including the cells their missing rules merged, and what the page's script geometry made of the block — each counting what it could not recover rather than hiding it. |
@@ -67,8 +67,8 @@ worse than no hook.
 | Check | Result |
 |---|---|
 | Canonical engine + fuzz + benchmark suite | 244 passed. |
-| Desktop persistence unit tests | 5 passed (queue recovery, history clean-up, preference validation incl. enabled model ids). |
-| Desktop shutdown tests | 6 passed; **71** desktop tests in total, all off-screen. Four are new and cover helper processes: that the bounded wait alone leaves one running, that the reap ends it, that ending it is what unblocks the worker, and that the listing never reports the `ps` doing the listing. |
+| Desktop persistence unit tests | 18 passed (queue recovery, history clean-up, and what a stored preference set written by another build means to this one -- unknown profile, cache policy or output name dropped at the read boundary, canonical output order, defaults never handed out for a caller to mutate). |
+| Desktop shutdown tests | 6 passed; **84** desktop tests in total, all off-screen. Four are new and cover helper processes: that the bounded wait alone leaves one running, that the reap ends it, that ending it is what unblocks the worker, and that the listing never reports the `ps` doing the listing. |
 | Desktop GUI shell tests | 52 passed off-screen: theme tokens, icon set, shell structure, splash gating, preference round-trips, the ported composition helpers, the interface face resolving to a family that is installed, the page-selection control, and the rotation, source-link, ruled-table and measured-formula evidence rows. Added 2026-08-23 from the coverage audit below: convert-button gating across all six of its branches, the error banner, the library's two-stage removal confirmation, the model pane's approval gate, and the byte-size, timestamp and model-setup summary helpers. |
 | Policy/SBOM checks | Local-only, model-fetch, licence, SBOM and engine-parity policies passed -- five gates. |
 | Desktop startup | Qt application constructed off-screen with five agreeing views. The check asserts that the stack, the ordered names and the header tabs describe the same set, rather than a fixed page count, so a view added to one and forgotten in the others is caught. It applies the interface face first, as `main()` does. |
@@ -80,7 +80,7 @@ worse than no hook.
 
 The port had 44 desktop tests against the source project's 104, and nobody had
 established what that difference was made of. Audited 2026-08-23, behaviour by
-behaviour rather than by counting. It is now 71, and the remaining difference is
+behaviour rather than by counting. It is now 84, and the remaining difference is
 described rather than left as a number.
 
 **The engine difference is fully explained and is not a gap.** The source runs
@@ -134,10 +134,23 @@ not merely untested — the code was wrong:
   property that a non-empty file is never reported as "0 KB".
 - **`model_setup_summary`** — untested, and correct: built-in runtimes and
   policy-blocked packs pad neither half of the count.
+- **Stored preferences are now validated on read as well as on write.** The
+  source parses `localStorage` and validates on read across 14 tests; the port
+  validated only on save, which looked sufficient because it owns its own
+  SQLite. It was not, and corruption was never the real risk: `OUTPUTS` and
+  `PROFILES` are part of the build and they change — `page_tree` was added — so
+  a database written by an older Philon holds names this build no longer offers,
+  having been perfectly valid when saved. `sanitize_preferences` drops them at
+  the boundary rather than forwarding them to the engine, falls back to the
+  documented defaults instead of raising, returns outputs in this build's
+  canonical order, and hands back a fresh copy every call so a caller that
+  mutates what it was given cannot reach the defaults every later caller reads.
+  Thirteen tests, and reverting the read to the unsanitized one makes the
+  round-trip test fail; that was checked.
 
 ### Gaps that are real and still open
 
-Named rather than closed, because closing them is a decision and not a test:
+One, and it is a decision rather than a test:
 
 - **The first-run model prompt does not exist in the port.** The source opens
   model setup once, records that it did, and says what it found and what it could
@@ -146,12 +159,9 @@ Named rather than closed, because closing them is a decision and not a test:
   claim is corrected there. Whether the port should gain the behaviour is the
   owner's call — it interacts with the about screen the port deliberately opens
   on *every* launch.
-- **Stored preferences are validated on write and not on read.** The source
-  parses `localStorage`, which any page can corrupt, and so validates on read
-  across 14 tests. The port reads its own SQLite through `save_preferences`,
-  which validates, so bad data can only arrive by editing the database directly.
-  Lower severity and a genuinely different threat model, but it is not the same
-  guarantee and should not be recorded as one.
+- **The first-run model prompt**, above — now a recorded decision rather than an
+  open question, and the only behaviour the source's suite covers that the port
+  deliberately does not.
 
 ## Process lifetime without a socket bridge
 
