@@ -2832,6 +2832,99 @@ class AutomaticRepairTest(unittest.TestCase):
         self.assertEqual(len(repaired), engine.AUTOMATIC_REPAIR_MAX_BLOCKS)
 
 
+class NativeImageExportTest(unittest.TestCase):
+    """What an extracted image is exported AS, which decides whether it can be seen.
+
+    The interface renders each extracted image in an `<img>`. A format no
+    browser engine can decode therefore arrives as a broken thumbnail beside a
+    perfectly correct pixel size -- which is what JPEG 2000 did, and JPEG 2000
+    is a common enough PDF image filter to matter.
+    """
+
+    class StubImage:
+        """One pypdf image XObject: original bytes, a name, and a decoded image."""
+
+        def __init__(self, name: str, data: bytes, decoded):
+            self.name = name
+            self.data = data
+            self.image = decoded
+
+    @staticmethod
+    def decoded(image_format: str, size=(4, 4)):
+        from PIL import Image
+
+        picture = Image.new("RGB", size, "white")
+        picture.format = image_format
+        return picture
+
+    def test_jpeg_2000_is_re_encoded_to_something_that_can_be_displayed(self):
+        original = b"the original jp2 bytes"
+        data, suffix, metadata = engine.describe_native_pdf_image(
+            self.StubImage("X1.jp2", original, self.decoded("JPEG2000")))
+        self.assertEqual(suffix, ".png")
+        self.assertEqual(metadata["mime_type"], "image/png")
+        self.assertTrue(metadata["normalised_for_export"])
+        self.assertEqual(data[:8], b"\x89PNG\r\n\x1a\n")
+        # Nothing provable is lost: the digest is of the bytes the PDF held,
+        # and the format they were in is recorded rather than forgotten.
+        self.assertEqual(metadata["source_bytes_sha256"], hashlib.sha256(original).hexdigest())
+        self.assertEqual(metadata["source_format"], "JPEG2000")
+
+    def test_tiff_is_re_encoded_too(self):
+        _, suffix, metadata = engine.describe_native_pdf_image(
+            self.StubImage("X2.tif", b"tiff bytes", self.decoded("TIFF")))
+        self.assertEqual(suffix, ".png")
+        self.assertEqual(metadata["source_format"], "TIFF")
+
+    def test_a_format_a_browser_can_show_is_left_exactly_as_the_pdf_held_it(self):
+        """Re-encoding what already works would discard the source bytes for nothing."""
+        original = b"\xff\xd8\xff the original jpeg bytes"
+        data, suffix, metadata = engine.describe_native_pdf_image(
+            self.StubImage("X3.jpg", original, self.decoded("JPEG")))
+        self.assertEqual(suffix, ".jpg")
+        self.assertEqual(data, original)
+        self.assertNotIn("normalised_for_export", metadata)
+
+    def test_an_image_that_cannot_be_decoded_keeps_its_bytes_and_claims_nothing(self):
+        """The CCITT case. Philon cannot re-encode what it could not read."""
+        class Undecodable(NativeImageExportTest.StubImage):
+            @property
+            def image(self):
+                raise ValueError("no decoder for this filter")
+
+            @image.setter
+            def image(self, value):
+                return None
+
+        data, suffix, metadata = engine.describe_native_pdf_image(
+            Undecodable("X4.bin", b"opaque", None))
+        self.assertEqual(data, b"opaque")
+        self.assertEqual(metadata["mime_type"], "application/octet-stream")
+        self.assertIn("inspection_error", metadata)
+
+    def test_the_manifest_version_moved_so_old_exports_are_re_extracted(self):
+        """A document already converted must not keep serving unopenable images.
+
+        `verified_artifact_manifest` refuses a manifest written against another
+        schema version, so bumping it is what makes this fix reach exports that
+        already exist rather than only new ones.
+        """
+        self.assertEqual(engine.ARTIFACT_MANIFEST_VERSION, "1.3")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "doc.pdf"
+            source.write_bytes(b"%PDF-1.7\n")
+            asset = root / "asset-0001-aaaaaaaaaaaa.jp2"
+            asset.write_bytes(b"stale")
+            stale = root / "manifest.json"
+            stale.write_text(json.dumps({
+                "schema_version": "1.2", "source": str(source),
+                "items": [{"path": str(asset), "bytes_sha256": hashlib.sha256(b"stale").hexdigest()}],
+            }), encoding="utf-8")
+            self.assertIsNone(engine.verified_artifact_manifest(stale, source),
+                              "a 1.2 manifest must not be reused now that 1.3 changed what is written")
+
+
 class ModelFetchTest(unittest.TestCase):
     """The one module allowed to reach the network, and what holds it there.
 
