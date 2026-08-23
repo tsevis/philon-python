@@ -22,7 +22,7 @@ from .settings_page import SettingsView
 from .source_panel import SourcePanel
 from .splash import Overlay, Splash
 from .widgets import Banner, ElidedLabel, MainTab, Segmented, TaskProgressCard, hbox, make_button, vbox
-from .workers import WorkThread, wait_for_workers
+from .workers import WorkThread, stop_leftover_children, wait_for_workers
 from .qt import (
     QAction,
     QFileDialog,
@@ -302,7 +302,18 @@ class MainWindow(QMainWindow):
             self.makers_mark.raise_()
 
     def closeEvent(self, event: Any) -> None:
-        wait_for_workers()
+        if not wait_for_workers():
+            # A worker that will not stop is one blocked on a helper process
+            # the engine started, and this port runs the engine in-process, so
+            # that helper is a child of the application rather than of a
+            # bridge that would take it down. Quitting anyway leaves an OCR or
+            # llama.cpp run holding a core with no window left to cancel it
+            # from, and destroying the thread makes Qt abort the whole
+            # application. Ending the child releases both: the worker was
+            # waiting on it, so it returns, which is why the wait is repeated
+            # rather than skipped.
+            stop_leftover_children()
+            wait_for_workers(2000)
         super().closeEvent(event)
 
     # -- shared state helpers ----------------------------------------------

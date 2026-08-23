@@ -13,9 +13,9 @@ import sys
 from .gui import theme
 from .gui.main_window import MainWindow
 from .gui.qt import QApplication
-from .gui.workers import WorkThread, wait_for_workers
+from .gui.workers import WorkThread, stop_leftover_children, wait_for_workers
 
-__all__ = ["MainWindow", "WorkThread", "wait_for_workers", "main"]
+__all__ = ["MainWindow", "WorkThread", "stop_leftover_children", "wait_for_workers", "main"]
 
 
 def follow_system_appearance(app: QApplication, holder: dict) -> None:
