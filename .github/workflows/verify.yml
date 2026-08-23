@@ -45,24 +45,36 @@ jobs:
       # A missing or expired token fails the checkout below with an error that
       # names neither the secret nor the fix. Say it here instead, before the
       # confusing one happens.
+      #
+      # There are two tokens, one per repository, each scoped to read ONLY its
+      # peer -- so this repository's token can read tsevis/philon and cannot read
+      # tsevis/philon-python. Neither token needs to read the repository holding it.
       - name: Check the peer-repository token is present
         env:
           PEER_TOKEN: ${{ secrets.PHILON_PEER_TOKEN }}
         run: |
           if [ -z "${PEER_TOKEN}" ]; then
-            echo "::error::PHILON_PEER_TOKEN is not set on this repository. The parity gate needs to check out the private peer repository, which the built-in GITHUB_TOKEN cannot read. Create a fine-grained PAT with Contents: Read on both repositories and add it as PHILON_PEER_TOKEN here."
+            echo "::error::PHILON_PEER_TOKEN is not set on tsevis/philon-python. The parity gate has to check out tsevis/philon, which is private and which the built-in GITHUB_TOKEN cannot read. Create a fine-grained PAT scoped to tsevis/philon only, with Contents: Read-only, and add it as PHILON_PEER_TOKEN here."
             exit 1
           fi
 
-      # The source project, so the parity gate has something to compare
-      # against. Both repositories are private, so this needs a token with
-      # read access to the other one, held as PHILON_PEER_TOKEN.
+      # The source project, so the parity gate has something to compare against.
       - name: Check out the source project
+        id: peer
         uses: actions/checkout@v7
         with:
           repository: tsevis/philon
           token: ${{ secrets.PHILON_PEER_TOKEN }}
           path: philon
+
+      # The likely misconfiguration, once there are two tokens: they get crossed.
+      # A token scoped to the wrong repository fails as "Repository not found",
+      # which reads like the repository is missing rather than the scope wrong.
+      - name: Explain a failed peer checkout
+        if: failure() && steps.peer.outcome == 'failure'
+        run: |
+          echo "::error::Could not check out tsevis/philon. PHILON_PEER_TOKEN on tsevis/philon-python must be scoped to tsevis/philon -- the PEER, not this repository. A token scoped to the wrong one of the pair reports the repository as not found. Check also that the token has not expired."
+          exit 1
 
       - uses: actions/setup-python@v7
         with:

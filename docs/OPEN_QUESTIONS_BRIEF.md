@@ -164,24 +164,38 @@ be dead and a red or absent run means nothing. In order:
    job of either kind starts.
 2. Re-enable `philon`'s two workflows, which are currently disabled. Only after
    (1), or they will simply resume failing at job start.
-3. Add a secret named `PHILON_PEER_TOKEN` to **both** repositories: a token with
-   read access to the other one. Both are private, so the parity job's second
-   checkout cannot succeed without it, and the job is deliberately written to
-   fail rather than skip when the peer is missing. This one does **not** depend
-   on the billing and can be done at any time. Create a fine-grained PAT at
-   <https://github.com/settings/personal-access-tokens/new>, scoped to
-   `tsevis/philon` and `tsevis/philon-python`, with **Contents: Read-only** and
-   nothing else, then:
+3. Add a secret named `PHILON_PEER_TOKEN` to **both** repositories. Both are
+   private, so the parity job's second checkout cannot succeed without it, and
+   the job is deliberately written to fail rather than skip when the peer is
+   missing. This one does **not** depend on the billing and can be done at any
+   time.
 
-       gh secret set PHILON_PEER_TOKEN --repo tsevis/philon          # paste at the prompt
-       gh secret set PHILON_PEER_TOKEN --repo tsevis/philon-python   # the same token
+   **Two tokens, one per repository, each scoped to read only its peer.** A
+   single token with read on both would mean a compromise of either repository's
+   Actions granting read to both; neither token needs to read the repository
+   that holds it. Create each at
+   <https://github.com/settings/personal-access-tokens/new> with
+   **Contents: Read-only** and nothing else:
+
+   | Token scoped to | Stored as `PHILON_PEER_TOKEN` in |
+   |---|---|
+   | `tsevis/philon-python` | `tsevis/philon` |
+   | `tsevis/philon` | `tsevis/philon-python` |
+
+       gh secret set PHILON_PEER_TOKEN --repo tsevis/philon          # the philon-python-scoped token
+       gh secret set PHILON_PEER_TOKEN --repo tsevis/philon-python   # the philon-scoped token
        gh secret list --repo tsevis/philon                           # confirm the name is there
 
-   Paste at the prompt rather than passing the value as an argument, so the
-   token does not land in shell history. Fine-grained tokens expire; when this
-   one does, the workflow fails at the guard step named
-   *Check the peer-repository token is present*, which says so in as many words
-   rather than failing inside `actions/checkout` with something opaque.
+   Paste at the prompt rather than passing the value as an argument, so neither
+   token lands in shell history.
+
+   The table is the thing to get right: crossing the two is the likely mistake,
+   and a token scoped to the wrong half of the pair fails as *Repository not
+   found*, which reads like a missing repository rather than a wrong scope. Both
+   workflows carry a step named *Explain a failed peer checkout* that says so.
+   A secret that is absent altogether is caught earlier still, by
+   *Check the peer-repository token is present*. Fine-grained tokens expire, and
+   the same two steps are what will report it when these do.
 
 Nothing is unprotected in the meantime, and no work needs to wait for it. Every
 gate the Linux job would run — including the parity gate, the one that matters
