@@ -156,46 +156,48 @@ all**, because both of that repository's workflows are `disabled_manually`:
 They were switched off, presumably after the billing failures started. That is a
 repository setting and was deliberately left alone.
 
-**Three things are owed by the owner, and cannot be done from here. The owner
-has scheduled them for 2026-09-01**, so between now and then CI is expected to
-be dead and a red or absent run means nothing. In order:
+**Three things were owed by the owner. The third is done; the other two are
+scheduled for 2026-09-01**, so between now and then CI is expected to be dead
+and a red or absent run means nothing.
 
-1. Clear the GitHub billing failure or raise the spending limit. Until then no
-   job of either kind starts.
-2. Re-enable `philon`'s two workflows, which are currently disabled. Only after
-   (1), or they will simply resume failing at job start.
-3. Add a secret named `PHILON_PEER_TOKEN` to **both** repositories. Both are
-   private, so the parity job's second checkout cannot succeed without it, and
-   the job is deliberately written to fail rather than skip when the peer is
-   missing. This one does **not** depend on the billing and can be done at any
-   time.
+1. **Outstanding.** Clear the GitHub billing failure or raise the spending
+   limit. Until then no job of either kind starts.
+2. **Outstanding.** Re-enable `philon`'s two workflows, which are currently
+   disabled. Only after (1), or they will simply resume failing at job start.
+3. **Done, 2026-08-23.** `PHILON_PEER_TOKEN` is set on both repositories.
 
    **Two tokens, one per repository, each scoped to read only its peer.** A
    single token with read on both would mean a compromise of either repository's
    Actions granting read to both; neither token needs to read the repository
-   that holds it. Create each at
-   <https://github.com/settings/personal-access-tokens/new> with
-   **Contents: Read-only** and nothing else:
+   that holds it. Both are fine-grained PATs with **Contents: Read-only**:
 
-   | Token scoped to | Stored as `PHILON_PEER_TOKEN` in |
-   |---|---|
-   | `tsevis/philon-python` | `tsevis/philon` |
-   | `tsevis/philon` | `tsevis/philon-python` |
+   | Token scoped to | Stored as `PHILON_PEER_TOKEN` in | Written |
+   |---|---|---|
+   | `tsevis/philon-python` | `tsevis/philon` | 2026-08-23T15:47:48Z |
+   | `tsevis/philon` | `tsevis/philon-python` | 2026-08-23T15:45:53Z |
+
+   **What is set is not the same as what is correct, and nothing has checked
+   the second.** Actions secrets are write-only: neither the owner nor a tool
+   can read a value back, and no job can exercise them until the billing
+   clears. `gh secret list` and `.total_count` report that a secret exists, not
+   that it holds what it should — an earlier attempt left one holding the
+   literal string `PASTE_TOKEN_HERE` and every count still read `1`. The
+   timestamps above are the only evidence, and they show when a value was
+   written, not which value.
+
+   So the first CI run after 1 September is the first thing that can tell you.
+   If the two are crossed, the peer checkout fails as *Repository not found*,
+   which reads like a missing repository rather than a wrong scope; both
+   workflows carry a step named *Explain a failed peer checkout* that says so.
+   A secret absent altogether is caught earlier by *Check the peer-repository
+   token is present*. Fine-grained tokens expire, and the same two steps are
+   what will report it when these do.
+
+   To replace either, paste at the prompt rather than passing the value as an
+   argument, so no token lands in shell history:
 
        gh secret set PHILON_PEER_TOKEN --repo tsevis/philon          # the philon-python-scoped token
        gh secret set PHILON_PEER_TOKEN --repo tsevis/philon-python   # the philon-scoped token
-       gh secret list --repo tsevis/philon                           # confirm the name is there
-
-   Paste at the prompt rather than passing the value as an argument, so neither
-   token lands in shell history.
-
-   The table is the thing to get right: crossing the two is the likely mistake,
-   and a token scoped to the wrong half of the pair fails as *Repository not
-   found*, which reads like a missing repository rather than a wrong scope. Both
-   workflows carry a step named *Explain a failed peer checkout* that says so.
-   A secret that is absent altogether is caught earlier still, by
-   *Check the peer-repository token is present*. Fine-grained tokens expire, and
-   the same two steps are what will report it when these do.
 
 Nothing is unprotected in the meantime, and no work needs to wait for it. Every
 gate the Linux job would run — including the parity gate, the one that matters
