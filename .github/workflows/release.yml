@@ -1,0 +1,93 @@
+name: Package Philon (Python)
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+# Path filters are deliberately absent: a tag means package this commit, and
+# GitHub does not evaluate path filters for tag pushes in any case. Packaging
+# is not cancelled when superseded, because a tag names one specific artefact.
+concurrency:
+  group: package-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  package:
+    # macOS, and unavoidably so: PyInstaller freezes the interpreter and every
+    # binary wheel for the architecture it runs on, the Vision helper is Swift
+    # against the Vision framework, and `hdiutil` and `codesign` are macOS. This
+    # job bills at 10x, which is why `verify.yml` does the cheap half on Linux
+    # and why this one runs on a tag rather than on every push.
+    runs-on: macos-15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.10"
+
+      # scripts/package-macos.sh builds and uses .venv, so CI builds the same
+      # environment a developer has rather than a system one the script cannot
+      # see. PyInstaller collects what it can import, so packaging from a
+      # general-purpose environment quietly ships it.
+      - name: Build the packaging environment
+        run: |
+          python3 -m venv .venv
+          .venv/bin/pip install --requirement requirements-build.txt
+
+      # The gates that do not need the peer checkout or a window. The engine
+      # parity gate is deliberately absent: it runs on every push in verify.yml
+      # and on every commit through the pre-commit hook, and adding a second
+      # private checkout to a 10x job to repeat it would buy nothing.
+      - name: Policy gates
+        run: |
+          .venv/bin/python tests/local_only_policy.py
+          .venv/bin/python tests/model_fetch_policy.py
+          .venv/bin/python tests/license_policy.py
+          .venv/bin/python tests/sbom_policy.py
+
+      # An isolated data root, so a packaging run never reads or writes the
+      # state a real install would keep.
+      - name: Desktop, engine, fuzz and benchmark suites
+        env:
+          PHILON_DATA_DIR: ${{ runner.temp }}/philon-ci-data
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          mkdir -p "${PHILON_DATA_DIR}" engine/dist
+          swiftc -O -framework Vision -framework AppKit engine/vision_ocr.swift \
+            -o engine/dist/philon-vision-ocr
+          .venv/bin/python -m unittest discover -s tests -v
+          PHILON_VISION_INTEGRATION=1 .venv/bin/python -m unittest \
+            engine/test_engine.py engine/test_fuzz.py bench/test_run.py -v
+
+      - name: Package the ad-hoc signed disk image
+        run: zsh scripts/package-macos.sh
+
+      # What the release checklist asks a person to confirm by hand, done here
+      # so a tagged build cannot skip it. The bundle must still satisfy its own
+      # seal after PlistBuddy edited Info.plist and the image was built from it.
+      - name: Confirm the seal and the checksum
+        run: |
+          codesign --verify --strict --verbose=2 dist/Philon.app
+          cd dist && shasum -a 256 -c Philon_*.dmg.sha256
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: Philon-adhoc-signed-macos-arm64
+          path: |
+            dist/Philon_*.dmg
+            dist/Philon_*.dmg.sha256
+
+# A notarized release needs an Apple Developer certificate, keychain setup,
+# Apple ID/app-specific password, and notary profile supplied by the owner.
+# This workflow intentionally produces an ad-hoc signed, un-notarized artefact
+# until those secrets are configured in a separate protected release environment.
+# Ad-hoc sealing is what lets `codesign --verify` pass on the bundle; it carries
+# no Developer ID and Gatekeeper still refuses it on another machine.
+#
+# The image is uploaded rather than committed: it is 48 MB against the source
+# project's 24 MB, because this bundle carries its own interpreter and the Qt
+# frameworks. See releases/README.md.
