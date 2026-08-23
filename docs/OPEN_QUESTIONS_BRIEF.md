@@ -20,8 +20,8 @@ Both on `main`, clean, pushed, `main...origin/main`.
     cd philon    && npm run release:verify                             # exit 0
     cd philon_p  && PHILON_DATA_DIR=$(mktemp -d) zsh scripts/verify-release.sh   # exit 0
 
-Baselines: philon 106 workspace + 256 engine + 8 Rust, 5 policy gates;
-philon_p 44 desktop + 235 engine/fuzz/bench, 5 policy gates, shell with 5
+Baselines: philon 106 workspace + 259 engine + 8 Rust, 5 policy gates;
+philon_p 44 desktop + 238 engine/fuzz/bench, 5 policy gates, shell with 5
 agreeing views, zero `qt.qpa` font warnings. IR is at **0.5.0**. The model
 manifest declares **15 packs, 8 fetchable, 3 unapproved**.
 
@@ -271,12 +271,16 @@ comparator's own version is part of what must be pinned.
 
 Unchanged from the first draft. None of these was taken.
 
-- **Markdown and merged cells.** A recovered table with merged cells renders
-  `colspan`/`rowspan` in HTML. Markdown cannot express either, so it keeps the
-  grid square and leaves the covered opening blank rather than repeating a value
-  the page wrote once. Faithful, but a reader may prefer the columns collapsed.
-  On the reference paper this shows up as a 14x6 grid representing 3 logical
-  columns.
+- **Markdown and merged cells — DECIDED 2026-08-23, collapse.** A column that
+  is covered in *every* row is blank from top to bottom, says nothing, and is
+  now dropped from the Markdown table: the reference paper's 14x6 grids render
+  as the three logical columns they are. A column covered in only *some* rows
+  is kept with its blanks, because dropping it would misalign the rows that do
+  use it and filling it in would repeat a value the page wrote once — which is
+  inventing, not recovering. HTML is unchanged and still says `colspan`; the
+  IR, the CSV and the page-tree export stay square, since a consumer reading
+  them by index is entitled to the grid the recovery found. `markdown_table_grid`
+  in the engine, with a fixture whose middle column no row uses.
 - **Formula semantics.** Philon recovers *typesetting* from measured baselines
   and sizes — it writes `x^{2}` — and makes no claim about what an equation
   means. Parsing structure (fractions, radicals, matrices) is unstarted and

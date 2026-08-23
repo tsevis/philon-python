@@ -66,7 +66,7 @@ worse than no hook.
 
 | Check | Result |
 |---|---|
-| Canonical engine + fuzz + benchmark suite | 235 passed. |
+| Canonical engine + fuzz + benchmark suite | 238 passed. |
 | Desktop persistence unit tests | 5 passed (queue recovery, history clean-up, preference validation incl. enabled model ids). |
 | Desktop shutdown tests | 2 passed; 42 desktop tests in total, all off-screen. |
 | Desktop GUI shell tests | 35 passed off-screen: theme tokens, icon set, shell structure, splash gating, preference round-trips, the ported composition helpers, the interface face resolving to a family that is installed, the page-selection control, and the rotation, source-link, ruled-table and measured-formula evidence rows. |

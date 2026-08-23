@@ -559,6 +559,37 @@ def markdown_table_cell(value: str) -> str:
     return str(value).replace("\\", "\\\\").replace("|", "\\|")
 
 
+def markdown_table_grid(rows: list[list[str]],
+                       spans: list[list[dict[str, int] | None]]) -> list[list[str]]:
+    """The rows Markdown renders, with the columns a merge left empty removed.
+
+    Markdown cannot say `colspan`, so a merged cell is written into one column
+    of a square grid and the openings it swallowed are written as nothing.
+    Where a column is covered in *every* row it therefore carries no value
+    anywhere and exists only as an artefact of the geometry: the reference
+    paper recovers a 14x6 grid that is three logical columns, three of whose
+    columns are empty from top to bottom. Those are dropped.
+
+    A column covered in only *some* rows is kept, blanks and all. Dropping it
+    would misalign the rows that do use it, and filling it in would mean
+    repeating a value the page wrote once, which is inventing rather than
+    recovering. HTML says `colspan` and needs none of this; the CSV and the
+    page-tree export stay square, because a consumer reading them by index is
+    entitled to the grid the recovery actually found.
+    """
+    if not spans or len(spans) != len(rows):
+        return [list(row) for row in rows]
+    width = len(rows[0]) if rows else 0
+    if any(len(row) != width for row in rows) or any(len(row) != width for row in spans):
+        # Grids that do not line up are not something to guess about.
+        return [list(row) for row in rows]
+    kept = [column for column in range(width)
+            if any(span_row[column] is not None for span_row in spans)]
+    if not kept or len(kept) == width:
+        return [list(row) for row in rows]
+    return [[row[column] for column in kept] for row in rows]
+
+
 def block_table_rows(block: dict[str, Any]) -> list[list[str]] | None:
     """The rows a table block has, preferring the ones its page proved.
 
@@ -3043,7 +3074,7 @@ def render_markdown(ir: dict[str, Any]) -> str:
         if block["type"] == "heading":
             lines.extend(["#" * (block["level"] or 2) + " " + text, ""])
         elif block["type"] == "table" and block_table_rows(block):
-            rows = block_table_rows(block) or []
+            rows = markdown_table_grid(block_table_rows(block) or [], block_table_spans(block))
             lines.append("| " + " | ".join(markdown_table_cell(cell) for cell in rows[0]) + " |")
             lines.append("| " + " | ".join("---" for _ in rows[0]) + " |")
             lines.extend("| " + " | ".join(markdown_table_cell(cell) for cell in row) + " |" for row in rows[1:])
