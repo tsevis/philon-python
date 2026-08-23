@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import json
 import platform
@@ -72,6 +73,27 @@ def run_comparator(name: str, spec: dict[str, object], source: Path, root: Path,
         "stdout": process.stdout[-2_000:],
         "stderr": process.stderr[-2_000:],
     }
+
+
+def source_identity(source: Path) -> dict[str, object]:
+    """Name the document a result was measured on, without publishing it.
+
+    `bench/README.md` gates a public claim on running "the same version-pinned
+    corpus, hardware, and methodology" -- and until now a result recorded the
+    hardware and the methodology and not one word about which files it read.
+    The corpus is private, so the path is not the thing to record; the digest
+    is. Two runs carrying the same digests measured the same bytes, and that is
+    provable by anyone holding the corpus without the corpus leaving the
+    machine.
+
+    The name is recorded too, because a digest alone is unreadable to a person
+    trying to work out what a year-old result covered.
+    """
+    digest = hashlib.sha256()
+    with open(source, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+    return {"filename": source.name, "bytes": source.stat().st_size, "sha256": digest.hexdigest()}
 
 
 def safe_component(value: str) -> str:
@@ -160,9 +182,10 @@ def main() -> None:
                 warnings = len(result["warnings"])
                 comparisons = {name: run_comparator(name, spec, source, root / "comparators", str(document["id"])) if isinstance(spec, dict) else {"status": "blocked", "error": "Comparator specification must be an object."} for name, spec in comparator_specs.items()}
                 contract = output_contract(result, expected)
-                output["results"].append({"id": document["id"], "cohort": document.get("cohort", "unclassified"), "status": result["status"], "milliseconds": cold_milliseconds, "latency": {"cold_milliseconds": cold_milliseconds, "warm_milliseconds": warm_milliseconds, "warm_cache_hit": warm_result["cache_hit"], "pages_per_second_cold": round(pages / (cold_milliseconds / 1000), 4) if cold_milliseconds else None}, "pages": pages, "blocks": len(result["blocks"]), "warnings": warnings, "cache_hit": result["cache_hit"], "native_fast_path_pages": sum(page["route"]["decision"] == "native-fast-path" for page in result["pages"]), "metrics": {"uncertainty_rate": round(warnings / max(1, len(result["blocks"])), 6), "source_map_coverage": round(sum(block.get("bbox") is not None for block in result["blocks"]) / max(1, len(result["blocks"])), 6), **contract}, "comparators": comparisons, "gates": {"min_pages": pages >= expected.get("min_pages", 0), "max_warnings": warnings <= expected.get("max_warnings", float("inf")), "required_outputs": not contract["missing_outputs"]}})
+                output["results"].append({"id": document["id"], "cohort": document.get("cohort", "unclassified"), "source": source_identity(source), "status": result["status"], "milliseconds": cold_milliseconds, "latency": {"cold_milliseconds": cold_milliseconds, "warm_milliseconds": warm_milliseconds, "warm_cache_hit": warm_result["cache_hit"], "pages_per_second_cold": round(pages / (cold_milliseconds / 1000), 4) if cold_milliseconds else None}, "pages": pages, "blocks": len(result["blocks"]), "warnings": warnings, "cache_hit": result["cache_hit"], "native_fast_path_pages": sum(page["route"]["decision"] == "native-fast-path" for page in result["pages"]), "metrics": {"uncertainty_rate": round(warnings / max(1, len(result["blocks"])), 6), "source_map_coverage": round(sum(block.get("bbox") is not None for block in result["blocks"]) / max(1, len(result["blocks"])), 6), **contract}, "comparators": comparisons, "gates": {"min_pages": pages >= expected.get("min_pages", 0), "max_warnings": warnings <= expected.get("max_warnings", float("inf")), "required_outputs": not contract["missing_outputs"]}})
             except Exception as exc:
-                output["results"].append({"id": document["id"], "cohort": document.get("cohort", "unclassified"), "status": "failed", "error": str(exc)})
+                identity = source_identity(source) if source.is_file() else {"filename": source.name, "bytes": None, "sha256": None}
+                output["results"].append({"id": document["id"], "cohort": document.get("cohort", "unclassified"), "source": identity, "status": "failed", "error": str(exc)})
     completed = [item for item in output["results"] if item["status"] != "failed"]
     durations = sorted(item["milliseconds"] for item in completed)
     rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss

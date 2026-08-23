@@ -20,8 +20,8 @@ Both on `main`, clean, pushed, `main...origin/main`.
     cd philon    && npm run release:verify                             # exit 0
     cd philon_p  && PHILON_DATA_DIR=$(mktemp -d) zsh scripts/verify-release.sh   # exit 0
 
-Baselines: philon 106 workspace + 259 engine + 8 Rust, 5 policy gates;
-philon_p 44 desktop + 238 engine/fuzz/bench, 5 policy gates, shell with 5
+Baselines: philon 106 workspace + 260 engine + 8 Rust, 5 policy gates;
+philon_p 44 desktop + 239 engine/fuzz/bench, 5 policy gates, shell with 5
 agreeing views, zero `qt.qpa` font warnings. IR is at **0.5.0**. The model
 manifest declares **15 packs, 8 fetchable, 3 unapproved**.
 
@@ -248,7 +248,7 @@ The local checkout also moved: its local commits — fixes written *for* Marker,
 unrelated to Philon — were rebased onto v2.0.0 on 2026-08-22. It is now 8 ahead
 and 5 behind `datalab-to/marker`, on which there is still no push access.
 
-## 6. Benchmarks are version-labelled now, and still blocked
+## 6. Benchmarks: run against Marker 2.0, and still blocked — with one gap found
 
 The heading-detection figures in the README were unlabelled as to what they were
 measured against. They can be dated exactly, and are:
@@ -259,13 +259,56 @@ measured against. They can be dated exactly, and are:
 * `6ae3889` is `v1.10.2-13-g6ae3889`: **marker-pdf 1.10.2**, `license =
   "GPL-3.0-or-later"`.
 
-So the numbers are true of marker-pdf 1.10.2 and are now stated that way in the
-README, along with the fact that they were not re-measured against 2.0. They
-were **annotated rather than re-run**: re-running means standing up Marker 2.0's
-ML stack against the same three papers, and public claims are gated behind the
-version-pinned corpus and methodology in `bench/README.md` in any case. The
-harness exists; the runs do not. The README's gating sentence now says that the
-comparator's own version is part of what must be pinned.
+### The run
+
+`bench/run.py` was run against **marker-pdf 2.0.0** on 2026-08-23, macOS 15.6
+arm64, Balanced profile, two born-digital documents. Marker 2.0 runs here: its
+models were already cached, so it needed no download.
+
+| document | pages | Philon cold | Philon warm | Marker wall | Marker's own |
+|---|---|---|---|---|---|
+| qwen-philon-blueprint | 26 | 5.7s | 0.23s | 43.7s | 24.7s |
+| attention-is-all-you-need | 15 | 4.3s | 0.15s | 28.3s | 10.3s |
+
+Roughly 17 seconds of each Marker wall time is one-off model loading — the gap
+between its wall time and the conversion time it reports itself. Both are worth
+stating: the wall figure is what one document costs a person, the conversion
+figure is what survives batching.
+
+**This does not lift the gate.** Two documents on one machine is a measurement,
+not a claim, and one of the two is an internal blueprint.
+
+### The gap it found
+
+**The harness never recorded which files it read.** A result named the machine,
+the profile and the corpus *name*, and nothing about the documents — which is
+why the 2026-08-15 run could not be reconciled with anything, and why the three
+papers behind the heading figures are not recoverable from this repository. The
+methodology gates a claim on "the same version-pinned corpus" and the tool
+recorded no corpus.
+
+Fixed: every result now carries each document's filename, byte count and
+SHA-256, and never its path. The corpus stays private and two runs carrying the
+same digests provably read the same bytes. Two tests cover it, including that a
+failed document is still identified and that no absolute path reaches the file.
+
+### What is still owed
+
+The heading recall/precision figures **cannot** be restated against Marker 2.0
+until someone says which three papers they were. Nothing in either repository
+records it. Two further points about those figures, whenever they are re-run:
+
+* `bench/run.py` does not measure heading recall or precision at all — it
+  measures timing, counts, coverage, gates, and optionally word/formula/table
+  accuracy against a gold file. The heading numbers were produced some other
+  way, and that method is not recorded either.
+* They treat **Marker's output as the reference, which is not gold.** Measured
+  on the two documents above, Philon scores 100% recall at 72% precision on one
+  and 85% at 100% on the other — but every one of the eight "false positives"
+  on the first is a real heading Marker missed (`Recommended technologies`,
+  `Phase 1 — Foundation`, and so on), so the precision figure understates. On
+  the second, Philon genuinely misses `Abstract` and `References`. Those are not
+  claims; they are what two documents showed.
 
 ## 7. Smaller decisions left open
 
