@@ -91,6 +91,16 @@ class SecondaryWorkspace(QWidget):
 
 
 def format_timestamp(value: str) -> str:
+    """A conversion's own recorded time, as the local machine would write it.
+
+    A timestamp that will not parse is shown exactly as it was stored, since
+    that is what Philon actually holds. An absent one is named as absent rather
+    than left as a blank in the row: a record with no time is a fact about the
+    record, and an empty string in front of the profile reads as a rendering
+    fault instead.
+    """
+    if not value:
+        return "Date not recorded"
     try:
         return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone().strftime("%-m/%-d/%Y, %-I:%M:%S %p")
     except ValueError:

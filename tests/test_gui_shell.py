@@ -24,6 +24,9 @@ from philon_desktop.gui import about  # noqa: E402
 from philon_desktop.gui.evidence_panel import EvidencePanel, changed_token_count, confidence_label  # noqa: E402
 from philon_desktop.gui.main_window import MainWindow  # noqa: E402
 from philon_desktop.gui.output_panel import markdown_body, table_rows  # noqa: E402
+from philon_desktop.gui.batch_view import bytes_label  # noqa: E402
+from philon_desktop.gui.secondary_pages import (  # noqa: E402
+    LibraryView, ModelsView, format_timestamp, model_setup_summary)
 from philon_desktop.gui.splash import Splash  # noqa: E402
 from philon_desktop.gui.workers import wait_for_workers  # noqa: E402
 
@@ -196,6 +199,244 @@ class PortedLogicTest(unittest.TestCase):
         self.assertIn("Phosphor", about.LEGAL)
         self.assertIn("PySide6", about.LEGAL)
         self.assertTrue(about.VERSION)
+
+    def test_byte_sizes_match_the_source_rounding(self):
+        """A file with bytes in it is never reported as "0 KB"."""
+        self.assertEqual(bytes_label(1), "1 KB")
+        self.assertEqual(bytes_label(4096), "4 KB")
+        self.assertEqual(bytes_label(1024 * 1024), "1.0 MB")
+        self.assertEqual(bytes_label(3_500_000), "3.3 MB")
+
+    def test_a_recorded_time_is_read_and_a_missing_one_is_named(self):
+        """The library dates a job by the time the local database recorded."""
+        self.assertEqual(format_timestamp("2026-08-23T15:47:48+00:00"),
+                         format_timestamp("2026-08-23T15:47:48Z"))
+        # Shown as stored rather than as a parsed date that is not one.
+        self.assertEqual(format_timestamp("whenever"), "whenever")
+        # And an absent time is a fact about the record, not a blank in the row.
+        self.assertEqual(format_timestamp(""), "Date not recorded")
+
+    def test_the_model_pane_counts_only_packs_a_person_can_act_on(self):
+        packs = [
+            {"id": "built-in", "required": True, "approved": True, "available_locally": True},
+            {"id": "here", "approved": True, "available_locally": True},
+            {"id": "fetchable", "approved": True, "available_locally": False, "downloadable": True},
+            {"id": "blocked", "approved": False, "available_locally": False, "downloadable": True},
+        ]
+        summary = model_setup_summary(packs)
+        # Two optional approved packs: the built-in and the policy-blocked one
+        # pad neither half of the count.
+        self.assertIn("1 of 2", summary)
+        self.assertIn("1 can be downloaded", summary)
+        self.assertEqual(model_setup_summary([packs[0], packs[3]]),
+                         "No optional model packs are approved for this build.")
+        self.assertNotIn("can be downloaded", model_setup_summary([packs[0], packs[1]]))
+
+
+class ConversionGatingTest(unittest.TestCase):
+    """Nothing can be converted that is not there, or that preflight refused.
+
+    The source project spreads this across four tests of its convert button.
+    Here it is one compound expression in `_refresh_command_bar`, so it is
+    worth exercising each branch of that expression rather than trusting it to
+    read correctly.
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.window = MainWindow(PhilonService(Path(_data_dir)))
+        wait_for_workers()
+        _app.processEvents()
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        wait_for_workers()
+
+    def setUp(self) -> None:
+        self.window.job_tabs.select("Single Job", announce=False)
+        self.window.single_path = None
+        self.window.running = False
+        self.window.batch_items = []
+        self.window.batch_preflight = {}
+
+    def _queue(self, *items) -> None:
+        self.window.job_tabs.select("Batch", announce=False)
+        self.window.batch_items = list(items)
+        self.window.batch_view.set_state(self.window.batch_items, self.window.batch_preflight, None)
+
+    def test_a_single_job_cannot_start_before_a_document_is_chosen(self):
+        self.window._refresh_command_bar()
+        self.assertFalse(self.window.convert_button.isEnabled())
+
+    def test_choosing_a_document_enables_the_conversion(self):
+        self.window.single_path = "/tmp/chosen.pdf"
+        self.window._refresh_command_bar()
+        self.assertTrue(self.window.convert_button.isEnabled())
+        self.assertEqual(self.window.selected_name.full_text(), "chosen.pdf")
+
+    def test_a_conversion_already_running_cannot_be_started_again(self):
+        self.window.single_path = "/tmp/chosen.pdf"
+        self.window.running = True
+        self.window._refresh_command_bar()
+        self.assertFalse(self.window.convert_button.isEnabled())
+        self.assertEqual(self.window.convert_button.text(), "Converting…")
+
+    def test_the_button_comes_back_when_a_conversion_ends(self):
+        """A failed conversion must not leave the workspace unusable."""
+        self.window.single_path = "/tmp/chosen.pdf"
+        self.window.running = True
+        self.window._refresh_command_bar()
+        self.window._finish_running("convert")
+        self.window._refresh_command_bar()
+        self.assertFalse(self.window.running)
+        self.assertTrue(self.window.convert_button.isEnabled())
+
+    def test_an_empty_batch_cannot_be_started(self):
+        self._queue()
+        self.window._refresh_command_bar()
+        self.assertFalse(self.window.convert_button.isEnabled())
+
+    def test_a_queued_batch_can_be_started(self):
+        self._queue({"source_path": "/tmp/a.pdf", "status": "queued"})
+        self.window._refresh_command_bar()
+        self.assertTrue(self.window.convert_button.isEnabled())
+
+    def test_a_batch_holding_a_document_preflight_blocked_cannot_be_started(self):
+        """One refused document stops the queue, not just itself."""
+        self._queue({"source_path": "/tmp/a.pdf", "status": "queued"},
+                    {"source_path": "/tmp/bad.pdf", "status": "queued"})
+        self.window.batch_preflight = {"/tmp/bad.pdf": {"source_path": "/tmp/bad.pdf", "status": "blocked",
+                                                        "reason": "The file is encrypted."}}
+        self.window._refresh_command_bar()
+        self.assertFalse(self.window.convert_button.isEnabled())
+
+    def test_the_page_range_is_offered_for_a_single_job_only(self):
+        """A queue of documents is not something one range can describe."""
+        self.window._refresh_command_bar()
+        self.assertTrue(self.window.pages_field.isVisibleTo(self.window))
+        self._queue({"source_path": "/tmp/a.pdf", "status": "queued"})
+        self.window._refresh_command_bar()
+        self.assertFalse(self.window.pages_field.isVisibleTo(self.window))
+
+
+class BannerTest(unittest.TestCase):
+    """A local failure is reported, and can be put away again."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.window = MainWindow(PhilonService(Path(_data_dir)))
+        wait_for_workers()
+        _app.processEvents()
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        wait_for_workers()
+
+    def test_a_failure_is_shown_rather_than_swallowed(self):
+        self.window.show_error("The local converter refused the document.")
+        self.assertTrue(self.window.error_banner.isVisibleTo(self.window))
+        self.assertIn("refused the document", self.window.error_banner.message.text())
+
+    def test_a_shown_banner_can_be_dismissed(self):
+        self.window.show_error("Something local went wrong.")
+        self.window._clear_banners()
+        self.assertFalse(self.window.error_banner.isVisibleTo(self.window))
+
+    def test_a_conversion_that_produced_nothing_says_why(self):
+        self.window._clear_banners()
+        self.window._conversion_finished({"results": [], "failures": [{"error": "The file is encrypted."}]})
+        wait_for_workers()
+        self.assertTrue(self.window.error_banner.isVisibleTo(self.window))
+        self.assertIn("encrypted", self.window.error_banner.message.text())
+
+    def test_choosing_a_new_document_clears_the_last_failure(self):
+        self.window.show_error("The last one failed.")
+        self.window.single_path = "/tmp/next.pdf"
+        self.window.error_banner.hide()
+        self.assertFalse(self.window.error_banner.isVisibleTo(self.window))
+
+
+class LibraryRemovalTest(unittest.TestCase):
+    """Removing local history is confirmed first, and says what it kept."""
+
+    def setUp(self) -> None:
+        self.view = LibraryView()
+        self.view.set_history([{"id": "j1", "created_at": "2026-08-21T10:00:00+00:00",
+                                "profile": "Balanced", "documents": 1, "warnings": 0}])
+
+    def tearDown(self) -> None:
+        self.view.deleteLater()
+        _app.processEvents()
+
+    def _button_labelled(self, fragment: str) -> QPushButton | None:
+        return next((b for b in self.view.findChildren(QPushButton) if fragment in b.text()), None)
+
+    def test_removal_is_not_offered_directly(self):
+        self.assertIsNotNone(self._button_labelled("Clean"))
+        self.assertIsNone(self._button_labelled("Remove 1 job"))
+
+    def test_asking_to_clean_asks_for_confirmation_first(self):
+        asked = []
+        self.view.clean_requested.connect(lambda: asked.append(True))
+        self.view._request_clean()
+        self.assertTrue(self.view.clean_pending)
+        self.assertIsNotNone(self._button_labelled("Remove 1 job"))
+        self.assertIsNotNone(self._button_labelled("Cancel"))
+        self.assertEqual(asked, [], "nothing may be removed on the first click")
+
+    def test_the_confirmation_can_be_taken_back(self):
+        self.view._request_clean()
+        self.view._cancel_clean()
+        self.assertFalse(self.view.clean_pending)
+        self.assertIsNone(self._button_labelled("Remove 1 job"))
+
+    def test_there_is_nothing_to_clean_with_no_history(self):
+        self.view.set_history([])
+        clean = self._button_labelled("Clean")
+        self.assertIsNotNone(clean)
+        self.assertFalse(clean.isEnabled())
+
+
+class ModelPolicyTest(unittest.TestCase):
+    """The approval gate is what the pane offers, not only what the engine enforces."""
+
+    def setUp(self) -> None:
+        self.view = ModelsView()
+
+    def tearDown(self) -> None:
+        self.view.deleteLater()
+        _app.processEvents()
+
+    def _toggles(self) -> list[QPushButton]:
+        return [b for b in self.view.findChildren(QPushButton) if b.objectName() == "ModelToggle"]
+
+    def test_a_policy_blocked_pack_cannot_be_enabled(self):
+        self.view.set_packs([{"id": "unapproved-pack", "approved": False, "available_locally": True,
+                              "readiness": "ready", "role": "repair", "runtime": "llama.cpp",
+                              "license": "UNRESOLVED - review required before distribution"}], [])
+        toggle = next(b for b in self._toggles() if b.text() != "Download")
+        self.assertFalse(toggle.isEnabled(), "an unapproved pack offered a working switch")
+
+    def test_an_approved_ready_pack_can_be_enabled(self):
+        self.view.set_packs([{"id": "approved-pack", "approved": True, "available_locally": True,
+                              "readiness": "ready", "role": "repair", "runtime": "llama.cpp",
+                              "license": "Apache-2.0"}], [])
+        toggle = next(b for b in self._toggles() if b.text() != "Download")
+        self.assertTrue(toggle.isEnabled())
+        self.assertEqual(toggle.text(), "Enable")
+
+    def test_a_download_is_never_offered_for_a_pack_policy_blocks(self):
+        self.view.set_packs([{"id": "unapproved-pack", "approved": False, "available_locally": False,
+                              "downloadable": True, "download_bytes": 520 * 1024 ** 2,
+                              "download_verified": True, "readiness": "absent",
+                              "role": "repair", "runtime": "llama.cpp", "license": "UNRESOLVED"}], [])
+        self.assertEqual([b for b in self._toggles() if b.text() == "Download"], [])
+
+    def test_a_built_in_runtime_offers_no_switch_at_all(self):
+        self.view.set_packs([{"id": "built-in", "required": True, "approved": True,
+                              "available_locally": True, "readiness": "ready",
+                              "role": "extraction", "runtime": "pdfium", "license": "BSD-3-Clause"}], [])
+        self.assertEqual(self._toggles(), [])
 
 
 class PageSelectionControlTest(unittest.TestCase):
