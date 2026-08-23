@@ -24,7 +24,7 @@ from philon_desktop.gui import about  # noqa: E402
 from philon_desktop.gui.evidence_panel import EvidencePanel, changed_token_count, confidence_label  # noqa: E402
 from philon_desktop.gui.main_window import MainWindow  # noqa: E402
 from philon_desktop.gui.output_panel import markdown_body, table_rows  # noqa: E402
-from philon_desktop.gui.splash import SPLASH_SEEN_KEY, Splash  # noqa: E402
+from philon_desktop.gui.splash import Splash  # noqa: E402
 from philon_desktop.gui.workers import wait_for_workers  # noqa: E402
 
 
@@ -78,12 +78,23 @@ class ShellTest(unittest.TestCase):
         self.assertEqual(self.window.view_names, ["workspace", "library", "models", "diagnostics", "settings"])
         self.assertEqual(set(self.window.main_tabs), {"workspace", "library", "models", "diagnostics", "settings"})
 
-    def test_first_launch_shows_the_splash_and_dismissal_records_it(self):
+    def test_every_launch_shows_the_splash_and_records_nothing(self):
+        """It was once per version. The owner asked for it on every launch.
+
+        Nothing is written down any more, because nothing is being decided: the
+        screen carries what Philon is, what it refuses to do and the sources
+        behind it, and that is worth meeting each time rather than once.
+        """
         self.assertIsInstance(self.window.overlay, Splash)
         self.window.overlay.dismissed.emit()
         _app.processEvents()
         self.assertIsNone(self.window.overlay)
-        self.assertEqual(self.service.store.setting(SPLASH_SEEN_KEY), about.VERSION)
+        # A second window, same store, same everything: it opens again.
+        second = MainWindow(self.service)
+        try:
+            self.assertIsInstance(second.overlay, Splash)
+        finally:
+            second.close()
 
     def test_command_bar_is_only_part_of_the_workspace_view(self):
         self.window.show_view("settings")

@@ -12,7 +12,6 @@ from typing import Any, Callable
 
 from ..core import DEFAULT_OUTPUTS, OUTPUTS, PROFILES, PhilonService
 from . import theme
-from .about import VERSION
 from .batch_view import BatchView
 from .evidence_panel import EvidencePanel
 from .output_panel import OutputPanel
@@ -21,7 +20,7 @@ from .review_editor import ReviewEditor
 from .secondary_pages import DiagnosticsView, LibraryView, ModelsView
 from .settings_page import SettingsView
 from .source_panel import SourcePanel
-from .splash import SPLASH_SEEN_KEY, Overlay, Splash
+from .splash import Overlay, Splash
 from .widgets import Banner, ElidedLabel, MainTab, Segmented, TaskProgressCard, hbox, make_button, vbox
 from .workers import WorkThread, wait_for_workers
 from .qt import (
@@ -83,8 +82,11 @@ class MainWindow(QMainWindow):
         self._load_history()
         if self.batch_id:
             self._reload_batch()
-        if self.service.store.setting(SPLASH_SEEN_KEY) != VERSION:
-            self._show_splash(first_run=True)
+        # Every launch, not once per version. The screen carries what Philon is,
+        # what it refuses to do, and the sources behind it, and the owner asked
+        # for it in front of them each time rather than once and then never
+        # again. Nothing is recorded, because nothing is being decided.
+        self._show_splash()
 
     # -- construction ------------------------------------------------------
     def _build(self) -> None:
@@ -120,7 +122,7 @@ class MainWindow(QMainWindow):
         info.setToolTip("About Philon")
         info.setIcon(pixmap("Info", 18, t["text_strong"]))
         info.setIconSize(QSize(18, 18))
-        info.clicked.connect(lambda: self._show_splash(first_run=False))
+        info.clicked.connect(lambda: self._show_splash())
         header_layout.addWidget(info, 0, Qt.AlignmentFlag.AlignVCenter)
         shell_layout.addWidget(header)
 
@@ -279,7 +281,7 @@ class MainWindow(QMainWindow):
             view_menu.addAction(action)
         help_menu = self.menuBar().addMenu("Help")
         about_action = QAction("About Philon", self)
-        about_action.triggered.connect(lambda: self._show_splash(first_run=False))
+        about_action.triggered.connect(lambda: self._show_splash())
         help_menu.addAction(about_action)
 
     # -- navigation --------------------------------------------------------
@@ -727,13 +729,7 @@ class MainWindow(QMainWindow):
             self.overlay.deleteLater()
             self.overlay = None
 
-    def _show_splash(self, first_run: bool) -> None:
+    def _show_splash(self) -> None:
         splash = Splash(self.centralWidget())
-
-        def dismiss() -> None:
-            if first_run:
-                self.service.store.save_setting(SPLASH_SEEN_KEY, VERSION)
-            self._close_overlay()
-
-        splash.dismissed.connect(dismiss)
+        splash.dismissed.connect(self._close_overlay)
         self._show_overlay(splash)
