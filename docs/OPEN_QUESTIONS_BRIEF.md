@@ -154,16 +154,25 @@ all**, because both of that repository's workflows are `disabled_manually`:
 They were switched off, presumably after the billing failures started. That is a
 repository setting and was deliberately left alone.
 
-**Three things are owed by the owner, and cannot be done from here:**
+**Three things are owed by the owner, and cannot be done from here. The owner
+has scheduled them for 2026-09-01**, so between now and then CI is expected to
+be dead and a red or absent run means nothing. In order:
 
 1. Clear the GitHub billing failure or raise the spending limit. Until then no
    job of either kind starts.
-2. Re-enable `philon`'s two workflows, which are currently disabled — worth
-   doing only after (1), or they will simply resume failing at job start.
+2. Re-enable `philon`'s two workflows, which are currently disabled. Only after
+   (1), or they will simply resume failing at job start.
 3. Add a secret named `PHILON_PEER_TOKEN` to **both** repositories: a token with
    read access to the other one. Both are private, so the parity job's second
    checkout cannot succeed without it, and the job is deliberately written to
    fail rather than skip when the peer is missing.
+
+Nothing is unprotected in the meantime, and no work needs to wait for it. Every
+gate the Linux job would run — including the parity gate, the one that matters
+most here — already runs inside both `verify-release` paths, which is where they
+have always actually run. What CI adds on 1 September is that they run whether or
+not someone remembered. Until then, running `verify-release` before pushing is
+the whole of the protection, as it was before this session.
 
 ## 5. Marker 2.0 is Apache-2.0 — the constraint is kept, on new grounds
 
