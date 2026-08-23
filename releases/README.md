@@ -75,9 +75,29 @@ universal build would have to be produced on, or cross-built for, both.
 
 ## What has been built
 
-| version | date | `.app` | DMG | verified |
+**No release has been cut from this repository yet.** What follows is a
+verification build, said plainly as that rather than dressed up as a shipped
+artefact.
+
+| version | date | `.app` | DMG | checks |
 |---|---|---|---|---|
-| 0.2.6 | 2026-08-23 | 127 MB | 48 MB | `hdiutil verify` CRC32 `$C00DD2AE`; `codesign --verify --strict` valid on disk |
+| 0.2.6 | 2026-08-23 | 127 MB | 48 MB | `hdiutil verify` valid; `codesign --verify --strict` valid on disk; `shasum -c` OK |
+
+The sizes above held across two independent builds of the same commit. **The
+digest did not, and will not.** A PyInstaller bundle is not byte-reproducible —
+it embeds build-varying data, so two builds of one commit give two different
+images:
+
+    hand-built    hdiutil verify ... CRC32 $C00DD2AE
+    script-built  hdiutil verify ... CRC32 $88D2580A
+
+So no digest is recorded in this table. Pinning one here would look like
+provenance and be nothing of the kind: it would identify a single machine's
+build, match nothing anyone else produced, and quietly rot. The record for a
+given image is the `.sha256` file written beside it at build time, which
+`scripts/package-macos.sh` generates from the same bytes `hdiutil verify`
+accepted. When a release is cut, its image and that file are what carry the
+claim.
 
 Earlier versions were built before packaging produced a disk image, so no image
 and no checksum exists for them. That is a gap in the record and not a claim
