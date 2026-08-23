@@ -32,6 +32,17 @@ host allow-list, a re-check of every redirect hop, and a SHA-256 comparison that
 must pass before anything is moved into place. It uses only the standard
 library, so the dependency count and the SBOM are unchanged.
 
+Two refinements came out of the first real download, on 2026-08-23. The redirect
+re-check has to be *reachable*, which is a separate property from existing, and
+it was not: `urllib.request.urlopen` follows redirects itself and returns only
+the final response, so a request to `huggingface.co` came back 200 from a CDN
+host the allow-list refuses and nothing had looked. The fetcher now opens through
+an opener built to refuse redirects. And that CDN is named for the region a
+client resolves to, so it cannot be listed exhaustively: a host beneath a named
+parent is allowed, matched with a **leading dot** in front of it, so
+`us.aws.cdn.hf.co` passes and `cdn.hf.co.example.invalid` does not. The gate
+fails if either property goes missing.
+
 ```bash
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
@@ -46,11 +57,24 @@ Application data is stored in `~/Library/Application Support/Philon Python`. Set
 .venv/bin/python -m unittest discover -s tests -v
 .venv/bin/python -m unittest engine/test_engine.py engine/test_fuzz.py bench/test_run.py -v
 .venv/bin/python tests/local_only_policy.py
+.venv/bin/python tests/model_fetch_policy.py
 .venv/bin/python tests/license_policy.py
 .venv/bin/python tests/sbom_policy.py
+.venv/bin/python tests/parity_policy.py
 ```
 
 The original engine test suite requires `pypdfium2`, `pypdf`, and Pillow. Apple Vision integration tests additionally require the locally compiled macOS helper and `PHILON_VISION_INTEGRATION=1`.
+
+`parity_policy.py` is the one that needs something outside this repository. This
+engine exists twice -- here and in the source project -- and each copy is only
+ever tested by its own suite, so the two can drift apart with every test
+passing. They once drifted to forty-six hunks that way, and this was the copy
+that was behind. The gate compares them: three files byte-identical, and
+`philon_engine.py` differing by exactly the one hunk recorded in
+[`docs/PARITY.md`](docs/PARITY.md). With the source checkout absent it says so
+on stderr and passes, since one repository alone is a legitimate way to work;
+CI sets `PHILON_PARITY_REQUIRE=1` so that going unchecked is an error there, and
+`PHILON_PARITY_PEER` points it at a checkout laid out some other way.
 
 ## Package macOS
 

@@ -24,6 +24,12 @@ fi
 PHILON_VISION_INTEGRATION=1 "${PYTHON}" -m unittest engine/test_engine.py engine/test_fuzz.py bench/test_run.py -v
 "${PYTHON}" tests/local_only_policy.py
 "${PYTHON}" tests/model_fetch_policy.py
+# The two repositories share one engine, and each one's suite only ever tests
+# its own copy -- so drift between them fails nothing. This is the check that
+# says whether they still agree. It skips loudly when the peer checkout is not
+# on this machine rather than failing, since one repository alone is a
+# legitimate way to work.
+"${PYTHON}" tests/parity_policy.py
 "${PYTHON}" tests/license_policy.py
 "${PYTHON}" tests/sbom_policy.py
 # Confirm that the native shell can be constructed without entering its event

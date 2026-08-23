@@ -6,6 +6,7 @@ import re
 import sys
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 MODULE_PATH = Path(__file__).with_name("philon_engine.py")
@@ -2809,6 +2810,114 @@ class ModelFetchTest(unittest.TestCase):
         self.assertTrue(fetch.is_allowed_url(url))
         self.assertIn("/resolve/main/model.gguf", url)
 
+    def test_the_regional_xet_cdn_is_allowed_and_only_beneath_its_own_parent(self):
+        """HuggingFace redirects large files to a per-region Xet CDN host.
+
+        The parent rule exists because that host is named for the region the
+        client resolves to and cannot be enumerated here. It is anchored on a
+        leading dot, so the look-alikes below -- every one of which an
+        unanchored suffix test would accept -- stay refused.
+        """
+        fetch = self.fetcher()
+        for url in ("https://cdn.hf.co/a", "https://us.aws.cdn.hf.co/a",
+                    "https://eu-west-1.aws.cdn.hf.co/a"):
+            self.assertTrue(fetch.is_allowed_url(url), url)
+        for url in ("https://cdn.hf.co.evil.invalid/a", "https://evil-cdn.hf.co/a",
+                    "https://notcdn.hf.co/a", "https://hf.co/a", "http://us.aws.cdn.hf.co/a"):
+            self.assertFalse(fetch.is_allowed_url(url), url)
+
+    # -- that the allow-list is actually in force on a redirect ---------------
+
+    def test_the_opener_does_not_follow_a_redirect_by_itself(self):
+        """The property the mocked tests below cannot see, and could not.
+
+        Every other test here patches `_open_checked`, so all of them exercise
+        the hand-written redirect loop. None of them exercised the opener that
+        loop runs on -- and urllib's default opener follows redirects itself and
+        returns only the final response, which left the loop unreachable and the
+        allow-list covering the first URL and nothing else. A real fetch of a
+        pack file returned a 200 from a CDN host `is_allowed_url` refuses.
+
+        This test stands up a loopback server that redirects, and asserts both
+        halves: the default opener follows it, and Philon's does not.
+        """
+        import http.server
+        import threading
+        import urllib.error
+        import urllib.request
+
+        class Redirecting(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):  # noqa: N802 - http.server's own contract
+                if self.path == "/from":
+                    self.send_response(302)
+                    self.send_header("Location", "/to")
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
+                self.send_response(200)
+                self.send_header("Content-Length", "8")
+                self.end_headers()
+                self.wfile.write(b"followed")
+
+            def log_message(self, *_args):
+                return
+
+        fetch = self.fetcher()
+        server = http.server.HTTPServer(("127.0.0.1", 0), Redirecting)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            start = f"http://127.0.0.1:{server.server_address[1]}/from"
+
+            # What urllib does unasked, and what this module used to inherit.
+            with urllib.request.urlopen(start, timeout=10) as followed:  # noqa: S310 - loopback
+                self.assertEqual(followed.read(), b"followed")
+
+            # What Philon's opener does instead: it hands the hop back.
+            with self.assertRaises(urllib.error.HTTPError) as refused:
+                fetch._opener().open(start, timeout=10)
+            self.assertEqual(refused.exception.code, 302)
+            self.assertEqual(refused.exception.headers.get("Location"), "/to")
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+
+    def test_a_redirect_off_the_allow_list_is_refused_rather_than_followed(self):
+        fetch = self.fetcher()
+        opener = _RedirectingOpener(["https://example.invalid/blob"])
+        with unittest.mock.patch.object(fetch, "_opener", return_value=opener):
+            with self.assertRaises(fetch.ModelFetchError) as refused:
+                fetch._open_checked("https://huggingface.co/a/b")
+        self.assertIn("example.invalid", str(refused.exception))
+        self.assertEqual(opener.opened, ["https://huggingface.co/a/b"],
+                         "the refused hop must not have been opened")
+
+    def test_a_redirect_onto_an_allowed_host_is_followed_and_re_checked(self):
+        fetch = self.fetcher()
+        opener = _RedirectingOpener(["https://us.aws.cdn.hf.co/xet/blob"])
+        with unittest.mock.patch.object(fetch, "_opener", return_value=opener):
+            response = fetch._open_checked("https://huggingface.co/a/b")
+        self.assertEqual(response.status, 200)
+        self.assertEqual(opener.opened,
+                         ["https://huggingface.co/a/b", "https://us.aws.cdn.hf.co/xet/blob"])
+
+    def test_a_relative_redirect_is_resolved_against_the_hop_it_came_from(self):
+        """Small files on HuggingFace redirect to a path, not an absolute URL."""
+        fetch = self.fetcher()
+        opener = _RedirectingOpener(["/api/resolve-cache/models/a/b"])
+        with unittest.mock.patch.object(fetch, "_opener", return_value=opener):
+            fetch._open_checked("https://huggingface.co/a/b")
+        self.assertEqual(opener.opened[-1], "https://huggingface.co/api/resolve-cache/models/a/b")
+
+    def test_a_redirect_chain_longer_than_the_limit_stops(self):
+        fetch = self.fetcher()
+        opener = _RedirectingOpener(["https://huggingface.co/hop"] * (fetch.MAX_REDIRECTS + 2))
+        with unittest.mock.patch.object(fetch, "_opener", return_value=opener):
+            with self.assertRaises(fetch.ModelFetchError) as stopped:
+                fetch._open_checked("https://huggingface.co/a/b")
+        self.assertIn("redirected more times", str(stopped.exception))
+
     # -- what it refuses to plan -------------------------------------------
 
     def test_a_file_name_that_escapes_its_destination_is_refused(self):
@@ -2938,6 +3047,29 @@ class ModelFetchTest(unittest.TestCase):
         offending = [line for line in text.splitlines()
                      if re.match(r"^(?:from|import)\s+model_fetch\b", line)]
         self.assertEqual(offending, [])
+
+
+class _RedirectingOpener:
+    """An opener that hands back the hops it was given, one 3xx at a time.
+
+    It stands in for `_opener()`, whose contract is now that it refuses to
+    follow a redirect itself and raises it instead. Recording what was opened is
+    the point: a hop the allow-list refuses must never have been opened at all.
+    Nothing here touches a network.
+    """
+
+    def __init__(self, locations: list[str]):
+        self._locations = list(locations)
+        self.opened: list[str] = []
+
+    def open(self, request, timeout=None):  # noqa: A003 - urllib's own contract
+        import urllib.error
+
+        url = request.full_url if hasattr(request, "full_url") else str(request)
+        self.opened.append(url)
+        if self._locations:
+            raise urllib.error.HTTPError(url, 302, "Found", {"Location": self._locations.pop(0)}, None)
+        return FakeResponse(b"the bytes")
 
 
 class FakeResponse:

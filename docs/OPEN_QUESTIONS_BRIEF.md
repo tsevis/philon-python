@@ -1,9 +1,8 @@
 # Open questions — brief for a fresh session
 
-Written 2026-08-23, at the end of a session that closed the geometric
-table-recovery gap and four features after it. Everything below is either a
-decision nobody has taken yet or a risk nobody has retired. It is written to be
-handed to a session that has none of the context that produced it.
+Written 2026-08-23 and revised the same day, after a session that took the six
+decisions the first draft asked for and retired three of the risks. It is
+written to be handed to a session that has none of the context that produced it.
 
 Nothing here is broken. Both projects are green, clean and pushed.
 
@@ -21,39 +20,63 @@ Both on `main`, clean, pushed, `main...origin/main`.
     cd philon    && npm run release:verify                             # exit 0
     cd philon_p  && PHILON_DATA_DIR=$(mktemp -d) zsh scripts/verify-release.sh   # exit 0
 
-Baselines: philon 106 workspace + 250 engine + 8 Rust, 4 policy gates;
-philon_p 44 desktop + 229 engine/fuzz/bench, 4 policy gates, shell with 5
+Baselines: philon 106 workspace + 256 engine + 8 Rust, 5 policy gates;
+philon_p 44 desktop + 235 engine/fuzz/bench, 5 policy gates, shell with 5
 agreeing views, zero `qt.qpa` font warnings. IR is at **0.5.0**. The model
 manifest declares **15 packs, 8 fetchable, 3 unapproved**.
 
 `engine/philon_engine.py` must be identical in both repos except **one**
 documented hunk (a `RuntimeError` in an `except` tuple, commented in the source,
-recorded in `philon_p/docs/PARITY.md`). `engine/model_fetch.py` and
-`engine/model-manifest.json` must be byte-identical in both. **Nothing checks
-any of this automatically** — see question 3.
+recorded in `philon_p/docs/PARITY.md`). `engine/model_fetch.py`,
+`engine/model-manifest.json` and `tests/parity_policy.py` must be byte-identical
+in both. `tests/parity_policy.py` is what checks all of that, and it runs in
+both `verify-release` paths — see question 3.
 
 ---
 
-## 1. The download path has never touched a real network
+## 1. The download path has now touched a real network — CLOSED, and it was broken
 
-**The most likely thing to be quietly broken.**
+`smolvlm-500m-local-candidate` was fetched for real on 2026-08-23 against an
+empty `PHILON_DATA_DIR`: 520 MB across two files, both digests matched, both
+installed, 107 seconds. The fetch works.
 
-Philon can now fetch a model pack, and offers to on first launch. Every test
-mocks the connection, so what is proven is the *policy* — HTTPS, an exact-match
-host allow-list, redirect re-checking, a SHA-256 that must match before anything
-is installed — and not that a real fetch succeeds. HuggingFace redirects blob
-requests to a CDN, and redirect chains and CDN behaviour are exactly where this
-kind of code fails.
+**It worked for the wrong reason, and the fix is the interesting part.**
 
-One real download of `smolvlm-500m-local-candidate` (520 MB, the smallest
-fetchable pack) would settle it. That pack is already present on this machine,
-so testing the fetch means pointing it at an empty `PHILON_DATA_DIR` or removing
-the discovered copy first — otherwise discovery short-circuits the download.
+`_open_checked` followed redirects by hand and re-checked every hop against the
+allow-list. That loop was unreachable. `urllib.request.urlopen` installs its own
+redirect handler, follows hops itself, and returns only the final response — so
+the allow-list was applied to the first URL and to nothing after it. Asking for
+a file on `huggingface.co` returned a 200 from `us.aws.cdn.hf.co`, a host
+`is_allowed_url` refuses, and nothing in the path had looked. Every test mocked
+`_open_checked` itself, so the whole suite exercised the loop and never the
+opener that bypassed it. This is exactly the shape of defect that only a real
+connection finds.
 
-**Question:** run it, and if the redirect chain does not behave, fix
-`_open_checked` in `engine/model_fetch.py` rather than widening the allow-list.
+Two changes:
 
-## 2. Seven licences are owner-confirmed, not verified
+* `_RefuseRedirects`, an `HTTPRedirectHandler` whose `redirect_request` returns
+  `None`, installed on an opener the module builds and opens through. urllib now
+  raises each 3xx instead of following it, and the hand-written loop sees every
+  hop. `engine/test_engine.py` stands up a loopback server that redirects and
+  asserts both halves — that the default opener follows it and that Philon's
+  does not. That test fails against the old behaviour; it was checked.
+* The allow-list was stale, not merely bypassed. HuggingFace no longer serves
+  large files from `cdn-lfs*.huggingface.co`; it serves them from Xet, on a CDN
+  host named for the region the client resolves to. `MODEL_HOST_ALLOWED_PARENTS`
+  now names `cdn.hf.co`, and a host matches it as the bare parent or with a
+  **leading dot** in front — so `us.aws.cdn.hf.co` is allowed and
+  `cdn.hf.co.example.invalid` is not. This was a deliberate widening onto a
+  second registrable domain, taken as a decision rather than absorbed as a
+  matching accident. Exact match still governs every other host.
+
+Both policy gates were extended to hold the module to the new property: they now
+fail if the module calls `urlopen`, if the refusing handler is absent, or if a
+parent domain is matched without the leading dot.
+
+**What is still owed:** nothing for this pack. The other seven fetchable packs
+have never been downloaded, and the largest is a great deal bigger than 520 MB.
+
+## 2. Seven licences are owner-confirmed, not verified — posture CONFIRMED
 
 The manifest distinguishes two things and the distinction is load-bearing:
 
@@ -66,91 +89,116 @@ The GGUF mirrors in `~/.cache/huggingface/hub` contain weights and nothing else:
 no README, no LICENSE. Seven packs are approved on the owner's say-so with that
 stated plainly rather than with a fabricated verification date.
 
-Two packs carry real restrictions and say so in their own entries:
-`gemma-4-12b-local-candidate` (Gemma Terms of Use — **not** OSI, terms travel
-with redistribution) and `minicpm-v-4.6-local-candidate` (commercial use
-requires registration with the publisher). Both are authorized for private local
-use and marked blocked from a distributed release.
+The ambiguous instruction from the previous session — both "keep current
+approvals only" *and* the three options that add approvals — was put back to the
+owner and **read as approve-everything, confirmed 2026-08-23**. The two
+restricted packs stay approved: `gemma-4-12b-local-candidate` (Gemma Terms of
+Use, **not** OSI, terms travel with redistribution) and
+`minicpm-v-4.6-local-candidate` (commercial use requires registration with the
+publisher). Both are authorized for private local use and marked blocked from a
+distributed release. The manifest's `policy` note now records the confirmation
+and its date.
 
-**Question:** if Philon is ever distributed, each of the seven needs a real
-model-card check. Until then, is owner-confirmed the right standing posture, or
-should the restricted two be moved back to `approved: false`?
+**What is still owed:** if Philon is ever distributed, each of the seven needs a
+real model-card check. That obligation is now written into the manifest itself
+rather than living only here.
 
-Related, and unresolved from the session: when asked which packs to approve, the
-owner selected *both* "keep current approvals only" *and* the three options that
-add approvals. It was read as approve-everything. **Confirm that reading.**
+## 3. Engine parity is now enforced by a gate — CLOSED
 
-## 3. Engine parity is enforced by hand and by nothing else
+`tests/parity_policy.py` is a fourth shared file, byte-identical in both repos,
+and it checks itself along with the other three. It runs in both
+`verify-release` paths. Given the peer checkout it asserts that
+`model_fetch.py`, `model-manifest.json` and the gate itself are byte-identical,
+and that `philon_engine.py` differs by exactly one hunk which is *the documented
+one* — one line of code on the port's side differing from the source's by the
+single added exception type, plus a comment naming `docs/PARITY.md`. A second
+divergence smuggled into that hunk fails. Each of those failure modes was
+provoked against a mutated copy and confirmed to fail.
 
-`diff` over the two engine copies must report exactly one hunk. It is checked
-manually at every step and there is no gate, no hook, and no CI.
+When the peer is not on the machine it **skips loudly** to stderr and exits 0,
+because one repository alone is a legitimate way to work. `PHILON_PARITY_REQUIRE=1`
+turns that skip into a failure, and the CI workflows set it — a gate that passes
+without a peer to compare against is indistinguishable from one that compared
+and was satisfied. `PHILON_PARITY_PEER` overrides the sibling-by-name search.
 
-This is the single most likely thing to break silently, because it breaks
-without any test failing in either repo — each repo tests its own copy, and both
-suites pass happily while the two engines drift.
+## 4. CI was never absent — it is blocked on billing
 
-**Question:** add a gate. The cheapest honest version is a script both
-`verify-release` runs, given the other repo's path when it is present and
-skipping loudly when it is not. A pre-commit hook is the alternative.
+The first draft of this brief said CI never runs. That was half right.
+`.github/workflows/verify.yml` and `release.yml` exist and are correctly wired.
+Every run since 2026-08-21 failed in three to five seconds *at job start*, with:
 
-## 4. CI never runs
+> The job was not started because recent account payments have failed or your
+> spending limit needs to be increased.
 
-`release:verify` is only ever as current as the last person who ran it locally.
-There is a `.github/` directory but nothing runs. GUI tests must stay off-screen
-(`QT_QPA_PLATFORM=offscreen` at import) and must never be run without asking.
+Both repositories are private and the existing job runs on `macos-15`, which
+bills at ten times the clock. So what was needed was not CI but cheaper CI, and
+an account that can start a job at all.
 
-**Question:** is CI wanted at all, given the project is local-first and the
-suites depend on a macOS Vision helper and a local model inventory? A partial CI
-that runs the engine suite and the four policy gates on Linux would catch
-parity drift and gate regressions without pretending to run the GUI.
+Added: an `engine-and-policy` job on `ubuntu-latest` in both repositories,
+billed at 1x. It runs the gates, the engine, fuzz and benchmark suites, and —
+uniquely — the parity gate, because that is the one check neither repository can
+perform alone. The macOS job keeps everything that genuinely needs a Mac: the
+Apple Vision helper, the Tauri build, the packaged bundle. On Linux the two
+Vision integration tests skip, which is the honest result there.
 
-## 5. Marker 2.0 is Apache-2.0, and the standing constraint assumed GPL
+**Two things are owed by the owner, and cannot be done from here:**
 
-**This one changes a premise, not just a fact.**
+1. Clear the GitHub billing failure or raise the spending limit. Until then no
+   job of either kind starts.
+2. Add a secret named `PHILON_PEER_TOKEN` to **both** repositories: a token with
+   read access to the other one. Both are private, so the parity job's second
+   checkout cannot succeed without it, and the job is deliberately written to
+   fail rather than skip when the peer is missing.
 
-`~/AI/marker` is at **version 2.0.0** on `master`, 7 local commits ahead of
-`origin/master` (`datalab-to/marker`, no push access), 4 files dirty. Those
-commits are fixes written *for* Marker and are unrelated to Philon.
+## 5. Marker 2.0 is Apache-2.0 — the constraint is kept, on new grounds
 
-The standing Philon constraint has been: *"Philon is MIT and reuses no Marker
-code; keep it that way"* — with the rationale that Marker is GPL and therefore
-incompatible.
+`~/AI/marker` is at **2.0.0** on `master`. The premise the standing constraint
+rested on has expired, and this is now recorded in three places rather than one.
 
-**That rationale is out of date.** Marker relicensed: the history goes GPL →
-OpenRAIL → Apache-2.0 (`65f73c9`, "Release prep: benchmarks harness,
-competitive results, Apache 2.0"). The 2.0 `LICENSE` is the Apache License 2.0
-with zero GPL references, and `pyproject.toml` says
-`license = { text = "Apache-2.0" }`.
+The history: Marker relicensed GPL → OpenRAIL → **Apache-2.0** (`65f73c9`,
+2026-07-17, "Release prep: benchmarks harness, competitive results, Apache
+2.0"), and released 2.0.0 on 2026-07-20. The 2.0 `LICENSE` is the Apache
+License 2.0 with zero GPL references and `pyproject.toml` says
+`license = { text = "Apache-2.0" }`. Apache-2.0 is compatible with an MIT
+project subject to attribution and NOTICE, so the *legal* barrier is gone.
 
-Apache-2.0 is compatible with an MIT project, subject to attribution and NOTICE
-obligations. So the *legal* barrier to reading or reusing Marker is gone.
+**Decision: keep the constraint, restate the reason.** Philon reuses no Marker
+code, on clean-room and dependency-budget grounds — the whole conversion path
+runs on four runtime dependencies against Marker's ML stack, and an engine that
+must justify every rectangle it emits is easier to hold to that standard when
+nothing in it was inherited. `README.md` now says exactly that, and says it of
+the `page_tree` rename too. `documents/RULED_TABLE_RECOVERY_BRIEF.md` carries
+the same restatement. `documents/Research/Claude_PhilonResearch.md` is a record
+of a decision and was **not** rewritten; it carries a dated erratum at the top
+saying which of its conclusions no longer follow from the licence. The Surya
+weight-licence claims in that document are separate and were not re-checked.
 
-The constraint may still be the right call — a clean-room implementation with
-four runtime dependencies is a deliberate product position, and Marker brings a
-large ML stack Philon has spent real effort avoiding. But it should now be held
-for that reason and stated as such, rather than for a licence reason that no
-longer holds.
+The local checkout also moved: its local commits — fixes written *for* Marker,
+unrelated to Philon — were rebased onto v2.0.0 on 2026-08-22. It is now 8 ahead
+and 5 behind `datalab-to/marker`, on which there is still no push access.
 
-**Questions:**
-- Restate the constraint on its real grounds (clean-room, dependency budget),
-  or relax it now that Apache-2.0 permits reuse with attribution?
-- The README says "Philon does not reuse Marker code or models" and the
-  compatibility export was renamed from `marker_json` to `page_tree` partly on
-  licence grounds. Does any of that wording need revisiting?
-- Marker 2.0 is a newer comparison target than the one Philon's benchmark
-  claims were measured against. The heading-detection results recorded in the
-  README ("100% recall at 100% precision" on three papers, etc.) were measured
-  against an **older Marker**. Those numbers are now unlabelled as to version
-  and should either be re-run against 2.0 or annotated with the version they
-  were taken against.
+## 6. Benchmarks are version-labelled now, and still blocked
 
-## 6. Benchmarks are blocked, not absent
+The heading-detection figures in the README were unlabelled as to what they were
+measured against. They can be dated exactly, and are:
 
-Public claims against Marker or Docling remain gated until the version-pinned
-corpus, hardware and methodology in `bench/README.md` have been run. The harness
-exists; the runs do not. See also the version-labelling problem in question 5.
+* Philon measured them on **2026-08-21** (`4989ebb`, `c8afdf1`).
+* `~/AI/marker` was cloned on 2026-05-31 at upstream `6ae3889`, dated
+  2026-05-05, and sat there until the rebase on 2026-08-22 — the day *after*.
+* `6ae3889` is `v1.10.2-13-g6ae3889`: **marker-pdf 1.10.2**, `license =
+  "GPL-3.0-or-later"`.
+
+So the numbers are true of marker-pdf 1.10.2 and are now stated that way in the
+README, along with the fact that they were not re-measured against 2.0. They
+were **annotated rather than re-run**: re-running means standing up Marker 2.0's
+ML stack against the same three papers, and public claims are gated behind the
+version-pinned corpus and methodology in `bench/README.md` in any case. The
+harness exists; the runs do not. The README's gating sentence now says that the
+comparator's own version is part of what must be pinned.
 
 ## 7. Smaller decisions left open
+
+Unchanged from the first draft. None of these was taken.
 
 - **Markdown and merged cells.** A recovered table with merged cells renders
   `colspan`/`rowspan` in HTML. Markdown cannot express either, so it keeps the
@@ -172,8 +220,10 @@ exists; the runs do not. See also the version-labelling problem in question 5.
 
 ## Standing constraints that still hold
 
-- **Parity.** One documented hunk in `philon_engine.py`; `model_fetch.py` and
-  `model-manifest.json` byte-identical. `diff` them.
+- **Parity.** One documented hunk in `philon_engine.py`; `model_fetch.py`,
+  `model-manifest.json` and `tests/parity_policy.py` byte-identical. This is now
+  gated rather than remembered — but run `diff` anyway when something looks off,
+  because the gate reports a count and `diff` shows you the lines.
 - **Coordinate frame.** PDFium reports page size with `/Rotate` applied and text
   and path coordinates without it. Everything downstream is in the **displayed**
   frame. Put every recovered rectangle through `bbox_to_displayed_frame`, and
@@ -183,9 +233,11 @@ exists; the runs do not. See also the version-labelling problem in question 5.
   rejected — by design.
 - **Prove or mark, never invent.** Ruled tables and measured script geometry are
   provable. Whitespace alignment is inference and is not emitted. Uncertainty
-  becomes a warning.
+  becomes a warning. A benchmark number carries the version it was measured
+  against, or it is not a number.
 - **Local only.** Conversion opens no connection. `engine/model_fetch.py` is the
-  single named exemption; the gate checks that exemption is load-bearing and
-  that the engine never imports the fetcher at module scope.
+  single named exemption; the gate checks that the exemption is load-bearing,
+  that the engine never imports the fetcher at module scope, and — since
+  2026-08-23 — that the fetcher's own redirect check is actually reachable.
 - **Tests.** Build PDF fixtures inline, byte by byte.
 - **GUI tests must not open windows**, and must never be run without asking.

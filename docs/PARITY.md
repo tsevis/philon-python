@@ -22,8 +22,20 @@ each** of `render_markdown` and `render_html`, the first of each being dead code
 shadowed by the second. Nothing detected any of it, because each repository
 tests its own copy and both suites passed throughout.
 
-Anything that changes this file must change it in both places, and `diff` over
-the two copies is the check that says whether that happened.
+Anything that changes this file must change it in both places, and until
+2026-08-23 `diff` over the two copies -- run by hand, by someone who remembered
+-- was the only check that said whether that happened.
+
+`tests/parity_policy.py` is that check now. It is a fourth shared file,
+byte-identical in both repositories, checking itself alongside the other three,
+and it runs inside both `verify-release` paths. Given the peer checkout it holds
+`model_fetch.py`, `model-manifest.json` and itself to byte identity, and holds
+`philon_engine.py` to exactly one hunk which must be *the documented one*: a
+single line of code on this side differing from the source's by the one added
+exception type, carrying a comment that names this file. A second divergence
+hidden inside that hunk fails the gate. Without the peer on the machine it skips
+loudly and passes, because one repository alone is a legitimate way to work;
+`PHILON_PARITY_REQUIRE=1` makes the skip an error, and CI sets it.
 
 | Area | Status | Evidence |
 |---|---|---|
@@ -48,11 +60,11 @@ the two copies is the check that says whether that happened.
 
 | Check | Result |
 |---|---|
-| Canonical engine + fuzz + benchmark suite | 210 passed, 2 Apple Vision integration tests skipped because the helper was not enabled in this validation session. |
+| Canonical engine + fuzz + benchmark suite | 235 passed. |
 | Desktop persistence unit tests | 5 passed (queue recovery, history clean-up, preference validation incl. enabled model ids). |
 | Desktop shutdown tests | 2 passed; 42 desktop tests in total, all off-screen. |
 | Desktop GUI shell tests | 35 passed off-screen: theme tokens, icon set, shell structure, splash gating, preference round-trips, the ported composition helpers, the interface face resolving to a family that is installed, the page-selection control, and the rotation, source-link, ruled-table and measured-formula evidence rows. |
-| Policy/SBOM checks | Local-only, licence, and SBOM policies passed. |
+| Policy/SBOM checks | Local-only, model-fetch, licence, SBOM and engine-parity policies passed -- five gates. |
 | Desktop startup | Qt application constructed off-screen with five agreeing views. The check asserts that the stack, the ordered names and the header tabs describe the same set, rather than a fixed page count, so a view added to one and forgotten in the others is caught. It applies the interface face first, as `main()` does. |
 | Single-document end-to-end | A generated four-page PDF, one page at `/Rotate 90` and one carrying a link annotation, converted under Verified: completed with no warnings, 4 pages, 7 evidence-linked blocks, rotation recorded as `[0, 0, 90, 0]`, one link measured onto the characters it covers, and 8 outputs written. |
 | Batch end-to-end | Two generated local PDFs completed from the SQLite queue; history entry persisted. |
