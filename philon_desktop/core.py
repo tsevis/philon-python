@@ -321,6 +321,20 @@ class PhilonService:
     def models(self) -> dict[str, Any]:
         return engine.model_status()
 
+    def fetch_model(self, pack_id: str, progress: Callable[[dict[str, Any]], None] | None = None) -> dict[str, Any]:
+        """Fetch one approved model pack, on an explicit request and never otherwise.
+
+        The only call in this application that reaches the network, and it is
+        reached only by asking for a pack by name. A conversion cannot arrive
+        here: the engine imports the fetcher inside the action rather than at
+        module scope, which `tests/local_only_policy.py` checks.
+        """
+        return engine.action_fetch_model({"pack_id": pack_id}, progress)
+
+    def remove_model(self, pack_id: str) -> dict[str, Any]:
+        """Delete a pack Philon fetched. A pack a person installed is untouched."""
+        return engine.action_remove_model({"pack_id": pack_id})
+
     def diagnostics(self) -> dict[str, Any]:
         return {"engine": engine.ENGINE_VERSION, "local_only": True, "database": str(self.store.database_path), "model_packs": engine.model_status()["packs"], "review_actions": ["accept", "edit", "restore_candidate", "rerun_region", "ignore_warning"]}
 

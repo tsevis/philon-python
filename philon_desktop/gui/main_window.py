@@ -148,6 +148,8 @@ class MainWindow(QMainWindow):
         self.models_view = ModelsView()
         self.models_view.refresh_requested.connect(self._load_models)
         self.models_view.toggle_requested.connect(self._toggle_model)
+        self.models_view.download_requested.connect(self._download_model)
+        self.models_view.remove_requested.connect(self._remove_model)
         self.diagnostics_view = DiagnosticsView()
         self.diagnostics_view.check_requested.connect(self._inspect_engine)
         self.settings_view = SettingsView()
@@ -631,6 +633,21 @@ class MainWindow(QMainWindow):
 
     def _models_loaded(self, reply: dict[str, Any]) -> None:
         self.models_view.set_packs(reply.get("packs", []), list(self.preferences.get("enabled_model_ids") or []))
+
+    def _download_model(self, pack_id: str) -> None:
+        """Fetch one approved pack, reporting progress like any other local job."""
+        self._spawn("models", "download", f"Downloading {pack_id.replace('-', ' ')}",
+                    lambda progress: self.service.fetch_model(pack_id, progress), self._model_fetched)
+
+    def _model_fetched(self, reply: dict[str, Any]) -> None:
+        if reply.get("models", {}).get("packs"):
+            self._models_loaded(reply["models"])
+        if reply.get("status") != "installed":
+            self.show_error(reply.get("message") or f"{reply.get('pack_id')} was not installed.")
+
+    def _remove_model(self, pack_id: str) -> None:
+        self._spawn("models", "models", f"Removing {pack_id.replace('-', ' ')}",
+                    lambda _progress: self.service.remove_model(pack_id), self._model_fetched)
 
     def _toggle_model(self, pack_id: str, enabled: bool) -> None:
         ids = [value for value in (self.preferences.get("enabled_model_ids") or []) if value != pack_id]

@@ -1,12 +1,18 @@
+import hashlib
 import importlib.util
 import json
 import os
+import re
 import sys
 import tempfile
 import unittest
 from pathlib import Path
 
 MODULE_PATH = Path(__file__).with_name("philon_engine.py")
+# The engine runs as a script from this directory, so its own folder is on the
+# path and `model_fetch` imports by name. Mirror that here rather than loading
+# the module a second, different way.
+sys.path.insert(0, str(MODULE_PATH.parent))
 SPEC = importlib.util.spec_from_file_location("philon_engine", MODULE_PATH)
 assert SPEC and SPEC.loader
 engine = importlib.util.module_from_spec(SPEC)
@@ -2755,6 +2761,204 @@ class AutomaticRepairTest(unittest.TestCase):
         self.assertIn("AUTOMATIC_REPAIR_LIMITED", [finding.code for finding in findings])
         repaired = [block for block in ir["blocks"] if block["text"] == "source text"]
         self.assertEqual(len(repaired), engine.AUTOMATIC_REPAIR_MAX_BLOCKS)
+
+
+class ModelFetchTest(unittest.TestCase):
+    """The one module allowed to reach the network, and what holds it there.
+
+    No test here opens a connection. What is under test is the policy around
+    the connection: which URLs are allowed, what is refused, and the guarantee
+    that nothing is installed until its bytes are the declared ones.
+    """
+
+    @staticmethod
+    def fetcher():
+        import model_fetch
+
+        return model_fetch
+
+    # -- which URLs it will speak to ---------------------------------------
+
+    def test_only_https_on_an_allow_listed_host_is_accepted(self):
+        fetch = self.fetcher()
+        self.assertTrue(fetch.is_allowed_url("https://huggingface.co/a/b"))
+        self.assertTrue(fetch.is_allowed_url("https://cdn-lfs.huggingface.co/a/b"))
+
+    def test_plain_http_is_refused_even_on_an_allowed_host(self):
+        self.assertFalse(self.fetcher().is_allowed_url("http://huggingface.co/a/b"))
+
+    def test_a_look_alike_host_is_refused(self):
+        """A suffix match would accept every one of these."""
+        fetch = self.fetcher()
+        for url in (
+            "https://huggingface.co.evil.invalid/a",
+            "https://evil-huggingface.co/a",
+            "https://nothuggingface.co/a",
+            "https://huggingface.co.example.invalid/a",
+        ):
+            self.assertFalse(fetch.is_allowed_url(url), url)
+
+    def test_anything_off_the_list_is_refused(self):
+        fetch = self.fetcher()
+        for url in ("https://example.invalid/a", "ftp://huggingface.co/a", "file:///etc/passwd", "", "not a url"):
+            self.assertFalse(fetch.is_allowed_url(url), url)
+
+    def test_a_url_is_built_on_the_allowed_host(self):
+        fetch = self.fetcher()
+        url = fetch.resolved_download_url("ggml-org/SmolVLM-500M-Instruct-GGUF", "model.gguf")
+        self.assertTrue(fetch.is_allowed_url(url))
+        self.assertIn("/resolve/main/model.gguf", url)
+
+    # -- what it refuses to plan -------------------------------------------
+
+    def test_a_file_name_that_escapes_its_destination_is_refused(self):
+        fetch = self.fetcher()
+        for name in ("../../etc/passwd", "/etc/passwd", "a\\\\b"):
+            pack = {"id": "p", "download": {"repository": "org/repo", "files": [{"name": name}]}}
+            with self.assertRaises(fetch.ModelFetchError):
+                fetch.pack_download_plan(pack)
+
+    def test_a_pack_declaring_no_download_cannot_be_planned(self):
+        fetch = self.fetcher()
+        with self.assertRaises(fetch.ModelFetchError):
+            fetch.pack_download_plan({"id": "p"})
+        with self.assertRaises(fetch.ModelFetchError):
+            fetch.pack_download_plan({"id": "p", "download": {"repository": "org/repo", "files": []}})
+
+    def test_an_unapproved_pack_is_never_fetched(self):
+        """A download must not be a way around the licence gate."""
+        fetch = self.fetcher()
+        pack = {"id": "p", "approved": False,
+                "download": {"repository": "org/repo", "files": [{"name": "a.gguf"}]}}
+        with self.assertRaises(fetch.ModelFetchError):
+            fetch.fetch_model_pack(pack, Path("/tmp"))
+
+    # -- what it refuses to install -----------------------------------------
+
+    def test_nothing_is_installed_when_the_digest_does_not_match(self):
+        from unittest.mock import patch
+
+        fetch = self.fetcher()
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "model.gguf"
+            with patch.object(fetch, "_open_checked", return_value=FakeResponse(b"not the bytes")):
+                with self.assertRaises(fetch.ModelFetchError):
+                    fetch.download_verified_file("https://huggingface.co/a", target, "0" * 64)
+            self.assertFalse(target.exists())
+            # ...and no partial file is left lying beside it either.
+            self.assertEqual(list(Path(directory).iterdir()), [])
+
+    def test_a_file_is_installed_when_the_digest_matches(self):
+        from unittest.mock import patch
+
+        fetch = self.fetcher()
+        payload = b"the declared bytes"
+        digest = hashlib.sha256(payload).hexdigest()
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "model.gguf"
+            with patch.object(fetch, "_open_checked", return_value=FakeResponse(payload)):
+                fetch.download_verified_file("https://huggingface.co/a", target, digest, len(payload))
+            self.assertEqual(target.read_bytes(), payload)
+
+    def test_a_size_the_host_disagrees_with_is_refused_before_reading(self):
+        from unittest.mock import patch
+
+        fetch = self.fetcher()
+        payload = b"short"
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "model.gguf"
+            with patch.object(fetch, "_open_checked",
+                              return_value=FakeResponse(payload, {"Content-Length": str(len(payload))})):
+                with self.assertRaises(fetch.ModelFetchError):
+                    fetch.download_verified_file("https://huggingface.co/a", target, None, 999_999)
+            self.assertFalse(target.exists())
+
+    def test_a_body_shorter_than_declared_is_refused(self):
+        from unittest.mock import patch
+
+        fetch = self.fetcher()
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "model.gguf"
+            with patch.object(fetch, "_open_checked", return_value=FakeResponse(b"ab")):
+                with self.assertRaises(fetch.ModelFetchError):
+                    fetch.download_verified_file("https://huggingface.co/a", target, None, 10)
+            self.assertFalse(target.exists())
+
+    # -- the store it manages -------------------------------------------------
+
+    def test_it_only_ever_removes_a_pack_it_installed(self):
+        fetch = self.fetcher()
+        with tempfile.TemporaryDirectory() as directory:
+            store = Path(directory) / "models"
+            (store / "a-pack").mkdir(parents=True)
+            (store / "a-pack" / "w.gguf").write_bytes(b"x")
+            self.assertTrue(fetch.remove_model_pack("a-pack", store))
+            self.assertFalse((store / "a-pack").exists())
+            # A pack that was never installed is simply absent, not an error.
+            self.assertFalse(fetch.remove_model_pack("a-pack", store))
+
+    # -- what the engine exposes ----------------------------------------------
+
+    def test_every_declared_download_is_approved_and_digest_bearing(self):
+        """A pack that could never be fetched should not advertise a download."""
+        for pack in engine.load_model_manifest()["packs"]:
+            download = pack.get("download")
+            if not download:
+                continue
+            self.assertTrue(pack["approved"], pack["id"])
+            for item in download["files"]:
+                self.assertRegex(str(item["sha256"]), r"^[0-9a-f]{64}$")
+                self.assertGreater(int(item["bytes"]), 0)
+
+    def test_the_status_reports_what_a_fetch_would_cost_without_asking_a_host(self):
+        status = engine.model_status()
+        self.assertIn("managed_store", status)
+        for pack in status["packs"]:
+            if pack["downloadable"]:
+                self.assertGreater(pack["download_bytes"], 0)
+                self.assertTrue(pack["download_verified"])
+
+    def test_an_unknown_pack_is_refused_by_name(self):
+        with self.assertRaises(ValueError):
+            engine.action_fetch_model({"pack_id": "no-such-pack"})
+        with self.assertRaises(ValueError):
+            engine.action_fetch_model({})
+
+    def test_an_unapproved_pack_is_refused_by_the_action_too(self):
+        result = engine.action_fetch_model({"pack_id": "qwen2.5-vl-3b-local-candidate"})
+        self.assertEqual(result["status"], "refused")
+
+    def test_a_pack_with_nothing_to_download_says_so(self):
+        result = engine.action_fetch_model({"pack_id": "olmocr-2-7b-local-candidate"})
+        self.assertEqual(result["status"], "unavailable")
+
+    def test_the_conversion_engine_does_not_import_the_fetcher_at_module_scope(self):
+        """The separation the local-only exemption rests on, asserted in Python too."""
+        text = Path(engine.__file__).read_text(encoding="utf-8")
+        offending = [line for line in text.splitlines()
+                     if re.match(r"^(?:from|import)\s+model_fetch\b", line)]
+        self.assertEqual(offending, [])
+
+
+class FakeResponse:
+    """A stand-in for an opened connection. Nothing here touches a network."""
+
+    def __init__(self, payload: bytes, headers: dict | None = None):
+        self._payload = payload
+        self._offset = 0
+        self.headers = headers or {}
+        self.status = 200
+
+    def read(self, size: int = -1) -> bytes:
+        if size is None or size < 0:
+            chunk, self._offset = self._payload[self._offset:], len(self._payload)
+            return chunk
+        chunk = self._payload[self._offset:self._offset + size]
+        self._offset += len(chunk)
+        return chunk
+
+    def close(self) -> None:
+        return None
 
 
 if __name__ == "__main__":

@@ -140,15 +140,53 @@ def model_runtime_readiness(pack: dict[str, Any], local_path: str | None, built_
         return ("ready", []) if not issues else ("incomplete", issues)
     if pack_id == "olmocr-2-7b-local-candidate":
         return "probe-required", ["Local files are present. Runtime availability is checked only when a manual repair is requested."]
+    # The packs added from the local model inventory are all llama.cpp GGUF
+    # builds, so one check covers them: the weight, the projector a vision
+    # model needs, and the executable that loads either.
+    runtime = str(pack.get("runtime", ""))
+    if runtime.startswith("llama.cpp local CLI"):
+        issues = []
+        weights = [found for found in root.glob("*.gguf") if not found.name.startswith("mmproj")]
+        if not weights:
+            issues.append("The GGUF weight is missing.")
+        if "multimodal projector" in runtime and not list(root.glob("mmproj*.gguf")):
+            issues.append("The multimodal projector is missing.")
+        executable = shutil.which("llama-cli") or str(Path.home() / ".local" / "bin" / "llama-cli")
+        if not Path(executable).is_file():
+            issues.append("llama-cli is not installed locally.")
+        return ("ready", []) if not issues else ("incomplete", issues)
     return "available", ["Local files are present; this adapter is not activated automatically."]
 
 
+def philon_data_root() -> Path:
+    """Where Philon keeps what it manages itself, honouring an explicit override."""
+    override = os.environ.get("PHILON_DATA_DIR")
+    if override:
+        return Path(override)
+    return Path.home() / "Library" / "Application Support" / "Philon"
+
+
+def managed_model_store() -> Path:
+    """The one directory Philon writes fetched packs into, and the only one."""
+    return philon_data_root() / "models"
+
+
 def model_status() -> dict[str, Any]:
-    """Expose declared model gates and offline runtime readiness without fetching."""
+    """Expose declared model gates and offline runtime readiness without fetching.
+
+    Nothing here reaches the network, including for a pack that declares a
+    download: a pack is reported as present because its files are on this
+    machine, never because a host says they exist.
+    """
     manifest = load_model_manifest()
+    store = managed_model_store()
     packs = []
     for pack in manifest.get("packs", []):
-        local_path = next((str(found) for candidate in pack.get("discovery_paths", []) for found in sorted(Path(item) for item in glob.glob(os.path.expanduser(candidate))) if found.exists()), None)
+        # A pack Philon fetched lives in the store it manages; one a person
+        # installed lives wherever they put it. Both count as present, and the
+        # managed copy is looked at last so a hand-installed one wins.
+        candidates = [*pack.get("discovery_paths", []), str(store / str(pack["id"]))]
+        local_path = next((str(found) for candidate in candidates for found in sorted(Path(item) for item in glob.glob(os.path.expanduser(candidate))) if found.exists()), None)
         available_locally = local_path is not None
         built_in = pack["id"] == "native-pdfium" or (pack["id"] == "apple-vision-ocr" and VISION_HELPER is not None and VISION_HELPER.exists())
         readiness, diagnostics = model_runtime_readiness(pack, local_path, built_in)
@@ -161,8 +199,19 @@ def model_status() -> dict[str, Any]:
             "integrity": pack.get("integrity"),
             "readiness": readiness,
             "diagnostics": diagnostics,
+            # What a person would have to fetch, and how much of it. Declared
+            # from the manifest alone -- reporting this must not touch a host.
+            "downloadable": bool(pack.get("download")),
+            "download_bytes": sum(int(item.get("bytes") or 0) for item in (pack.get("download") or {}).get("files", [])) or None,
+            "download_verified": bool(pack.get("download")) and all(
+                item.get("sha256") for item in (pack.get("download") or {}).get("files", [])
+            ),
+            "managed": local_path is not None and str(local_path).startswith(str(store)),
         })
-    return {"schema_version": manifest.get("schema_version"), "policy": manifest.get("policy"), "packs": packs}
+    return {
+        "schema_version": manifest.get("schema_version"), "policy": manifest.get("policy"),
+        "packs": packs, "managed_store": str(store),
+    }
 
 
 def sha256_file(path: Path) -> str:
@@ -4438,6 +4487,60 @@ def action_models() -> dict[str, Any]:
     return model_status()
 
 
+def action_fetch_model(request: dict[str, Any], progress: Any | None = None) -> dict[str, Any]:
+    """Fetch one approved model pack, on an explicit request and never otherwise.
+
+    This is the only action in Philon that opens a network connection, and it
+    is reached only by asking for it by name. A conversion cannot arrive here:
+    nothing in the conversion path imports the fetcher, which is why the import
+    is local to this function rather than at module scope.
+    """
+    pack_id = request.get("pack_id")
+    if not isinstance(pack_id, str) or not pack_id.strip():
+        raise ValueError("A model fetch must name the pack to fetch.")
+    pack = next((item for item in load_model_manifest().get("packs", []) if item.get("id") == pack_id), None)
+    if not pack:
+        raise ValueError(f"No model pack is declared with the id {pack_id!r}.")
+    if not pack.get("approved", False):
+        return {"status": "refused", "pack_id": pack_id,
+                "message": "This pack is not approved by Philon's local model policy, so it is not fetched."}
+    if not pack.get("download"):
+        return {"status": "unavailable", "pack_id": pack_id,
+                "message": "This pack declares no download. Install it locally and Philon will discover it."}
+
+    from model_fetch import ModelFetchError, fetch_model_pack
+
+    store = managed_model_store()
+    def report(payload: dict[str, Any]) -> None:
+        if progress:
+            written, total = payload.get("written_bytes") or 0, payload.get("total_bytes")
+            progress({
+                "job_id": request.get("job_id"), "stage": "downloading",
+                "percent": round(written / total * 100) if total else 0,
+                "indeterminate": not total,
+                "message": f"Fetching {payload.get('file')} ({payload.get('file_index')} of {payload.get('file_count')})",
+            })
+    try:
+        result = fetch_model_pack(pack, store, report)
+    except ModelFetchError as exc:
+        return {"status": "failed", "pack_id": pack_id, "message": str(exc)}
+    if progress:
+        progress({"job_id": request.get("job_id"), "stage": "complete", "percent": 100,
+                  "message": f"{pack_id} is installed locally"})
+    return {"status": "installed", **result, "models": model_status()}
+
+
+def action_remove_model(request: dict[str, Any]) -> dict[str, Any]:
+    """Delete a pack Philon fetched. A pack a person installed is never touched."""
+    pack_id = request.get("pack_id")
+    if not isinstance(pack_id, str) or not pack_id.strip():
+        raise ValueError("A model removal must name the pack to remove.")
+    from model_fetch import remove_model_pack
+
+    removed = remove_model_pack(pack_id, managed_model_store())
+    return {"status": "removed" if removed else "absent", "pack_id": pack_id, "models": model_status()}
+
+
 async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, expected_token: str) -> None:
     try:
         raw = await reader.readline()
@@ -4461,6 +4564,10 @@ async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, exp
             response = {"ok": True, "data": action_review(request)}
         elif action == "models":
             response = {"ok": True, "data": action_models()}
+        elif action == "fetch_model":
+            response = {"ok": True, "data": action_fetch_model(request, report_progress)}
+        elif action == "remove_model":
+            response = {"ok": True, "data": action_remove_model(request)}
         elif action == "health":
             response = {"ok": True, "data": {"engine": ENGINE_VERSION, "local_only": True, "review_actions": ["accept", "edit", "restore_candidate", "rerun_region", "ignore_warning"]}}
         else:
