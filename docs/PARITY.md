@@ -47,10 +47,10 @@ the two copies is the check that says whether that happened.
 
 | Check | Result |
 |---|---|
-| Canonical engine + fuzz + benchmark suite | 141 passed, 2 Apple Vision integration tests skipped because the helper was not enabled in this validation session. |
+| Canonical engine + fuzz + benchmark suite | 174 passed, 2 Apple Vision integration tests skipped because the helper was not enabled in this validation session. |
 | Desktop persistence unit tests | 5 passed (queue recovery, history clean-up, preference validation incl. enabled model ids). |
-| Desktop shutdown tests | 2 passed; 37 desktop tests in total, all off-screen. |
-| Desktop GUI shell tests | 30 passed off-screen: theme tokens, icon set, shell structure, splash gating, preference round-trips, the ported composition helpers, the interface face resolving to a family that is installed, the page-selection control, and the rotation and source-link evidence rows. |
+| Desktop shutdown tests | 2 passed; 40 desktop tests in total, all off-screen. |
+| Desktop GUI shell tests | 33 passed off-screen: theme tokens, icon set, shell structure, splash gating, preference round-trips, the ported composition helpers, the interface face resolving to a family that is installed, the page-selection control, and the rotation, source-link and ruled-table evidence rows. |
 | Policy/SBOM checks | Local-only, licence, and SBOM policies passed. |
 | Desktop startup | Qt application constructed off-screen with five agreeing views. The check asserts that the stack, the ordered names and the header tabs describe the same set, rather than a fixed page count, so a view added to one and forgotten in the others is caught. It applies the interface face first, as `main()` does. |
 | Single-document end-to-end | A generated four-page PDF, one page at `/Rotate 90` and one carrying a link annotation, converted under Verified: completed with no warnings, 4 pages, 7 evidence-linked blocks, rotation recorded as `[0, 0, 90, 0]`, one link measured onto the characters it covers, and 8 outputs written. |
