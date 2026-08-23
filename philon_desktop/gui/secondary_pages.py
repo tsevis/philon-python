@@ -194,9 +194,37 @@ MODEL_STATUS = {
 }
 
 
+def pack_download_label(pack: dict[str, Any]) -> str | None:
+    """What a pack would cost to fetch, from the manifest and never from a host."""
+    if not pack.get("downloadable"):
+        return None
+    total = int(pack.get("download_bytes") or 0)
+    size = f"{total / 1024 ** 3:.1f} GB" if total >= 1024 ** 3 else f"{max(1, round(total / 1024 ** 2))} MB"
+    return f"{size}, checked against a SHA-256" if pack.get("download_verified") else f"{size}, no digest declared"
+
+
+def model_setup_summary(packs: list[dict[str, Any]]) -> str:
+    """One line on what a first run found, and what it would have to fetch.
+
+    Counts only packs a person can act on, so built-in runtimes and the packs
+    policy blocks pad neither half.
+    """
+    optional = [pack for pack in packs if not pack.get("required") and pack.get("approved")]
+    if not optional:
+        return "No optional model packs are approved for this build."
+    present = sum(1 for pack in optional if pack.get("available_locally"))
+    fetchable = sum(1 for pack in optional if not pack.get("available_locally") and pack.get("downloadable"))
+    if not fetchable:
+        return f"{present} of {len(optional)} approved packs are already on this machine."
+    return (f"{present} of {len(optional)} approved packs are already on this machine; "
+            f"{fetchable} can be downloaded.")
+
+
 class ModelsView(SecondaryWorkspace):
     refresh_requested = Signal()
     toggle_requested = Signal(str, bool)
+    download_requested = Signal(str)
+    remove_requested = Signal(str)
 
     def __init__(self) -> None:
         super().__init__()
@@ -213,7 +241,14 @@ class ModelsView(SecondaryWorkspace):
         self.clear()
         refresh = make_button("Refresh", "SecondaryButton", "ArrowClockwise", 16)
         refresh.clicked.connect(self.refresh_requested.emit)
-        self.heading("Models", "MagicWand", "Local model access", "Optional models stay off until you enable them. Philon never downloads or uploads a model or your document.", [refresh])
+        self.heading(
+            "Models", "MagicWand", "Local model access",
+            "Optional models stay off until you enable them. Philon never uploads a model or your "
+            "document. A pack you ask for is downloaded from its publisher over HTTPS and installed "
+            "only if every file matches the SHA-256 recorded in Philon's manifest. "
+            + model_setup_summary(self.packs),
+            [refresh],
+        )
         if not self.packs:
             self.empty_state("MagicWand", "Inspect local model availability.")
             return
@@ -235,12 +270,38 @@ class ModelsView(SecondaryWorkspace):
         role = theme.label(f"{pack.get('role', '')} · {pack.get('runtime', '')}", size=11, color=t["text_secondary"])
         role.setWordWrap(True)
         text_column.addWidget(role)
+        licence = theme.label(str(pack.get("license", "")), size=10, color=t["text_tertiary"])
+        licence.setWordWrap(True)
+        text_column.addWidget(licence)
+        download_label = pack_download_label(pack)
+        if download_label and not pack.get("available_locally"):
+            note = theme.label(f"Download {download_label}", size=10, color=t["text_tertiary"])
+            note.setWordWrap(True)
+            text_column.addWidget(note)
+        if pack.get("managed"):
+            note = theme.label("Installed by Philon into its own model store", size=10, color=t["text_tertiary"])
+            note.setWordWrap(True)
+            text_column.addWidget(note)
         for diagnostic in pack.get("diagnostics") or []:
             note = theme.label(str(diagnostic), size=10, color=t["text_tertiary"])
             note.setWordWrap(True)
             text_column.addWidget(note)
         layout.addLayout(text_column, 1)
         readiness = str(pack.get("readiness") or "")
+        if pack.get("approved") and not pack.get("required") and pack.get("downloadable") and not pack.get("available_locally"):
+            download = QPushButton("Download")
+            download.setObjectName("ModelToggle")
+            download.setCursor(Qt.CursorShape.PointingHandCursor)
+            theme.font(download, 11, 700)
+            download.clicked.connect(lambda _=False, pack_id=str(pack.get("id")): self.download_requested.emit(pack_id))
+            layout.addWidget(download)
+        if pack.get("managed"):
+            remove = QPushButton("Remove")
+            remove.setObjectName("ModelToggle")
+            remove.setCursor(Qt.CursorShape.PointingHandCursor)
+            theme.font(remove, 11, 700)
+            remove.clicked.connect(lambda _=False, pack_id=str(pack.get("id")): self.remove_requested.emit(pack_id))
+            layout.addWidget(remove)
         if pack.get("required"):
             layout.addWidget(theme.label("Built in", size=11, weight=650, color=t["text_secondary"]))
         else:

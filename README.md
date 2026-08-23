@@ -18,7 +18,19 @@ The application is local-first and offline by default. It has no cloud providers
 
 ## Run locally
 
-Use a Python 3.10+ virtual environment. Installing dependencies is a developer-controlled operation; Philon itself never downloads a model or uses the network.
+Use a Python 3.10+ virtual environment. Installing dependencies is a developer-controlled operation.
+
+Conversion opens no connection at all, and no document, fragment or filename
+ever leaves the machine. There is exactly **one** thing Philon will fetch, and
+only when you ask for it by name in the Models pane: a model pack. It lives in
+`engine/model_fetch.py`, the single file exempt from the local-only gate — a
+**named file**, not a relaxed pattern, so every source that runs a conversion is
+still held to the original rule. The gate additionally checks that the exemption
+is load-bearing and that the engine never imports the fetcher at module scope,
+and `tests/model_fetch_policy.py` holds that one file to HTTPS, an exact-match
+host allow-list, a re-check of every redirect hop, and a SHA-256 comparison that
+must pass before anything is moved into place. It uses only the standard
+library, so the dependency count and the SBOM are unchanged.
 
 ```bash
 python3 -m venv .venv

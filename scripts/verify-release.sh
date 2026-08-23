@@ -23,6 +23,7 @@ if [[ ! -x "${ROOT_DIR}/engine/dist/philon-vision-ocr" ]]; then
 fi
 PHILON_VISION_INTEGRATION=1 "${PYTHON}" -m unittest engine/test_engine.py engine/test_fuzz.py bench/test_run.py -v
 "${PYTHON}" tests/local_only_policy.py
+"${PYTHON}" tests/model_fetch_policy.py
 "${PYTHON}" tests/license_policy.py
 "${PYTHON}" tests/sbom_policy.py
 # Confirm that the native shell can be constructed without entering its event

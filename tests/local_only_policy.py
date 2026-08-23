@@ -15,6 +15,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SOURCES = [
     ROOT / "engine" / "philon_engine.py",
+    # Listed so the exemption below is a deliberate skip of a known file rather
+    # than a file nobody remembered to scan.
+    ROOT / "engine" / "model_fetch.py",
     ROOT / "philon_desktop" / "core.py",
     ROOT / "philon_desktop" / "app.py",
     *sorted((ROOT / "philon_desktop" / "gui").glob("*.py")),
@@ -70,14 +73,49 @@ for sample in MUST_ACCEPT:
     if hits:
         raise SystemExit(f"Local-only policy is too broad: {sample!r} rejected by {hits}")
 
+# ONE file is exempt: engine/model_fetch.py, which fetches a model pack a person
+# explicitly asked for. The exemption is a named file rather than a relaxed
+# pattern, so the guarantee the rest of the project makes is unchanged: a
+# conversion still cannot reach the network, because none of the files that run
+# one are allowed to. What the exempt file may itself do is held down by
+# tests/model_fetch_policy.py.
+EXEMPT = {
+    ROOT / "engine" / "model_fetch.py": "explicit, allow-listed, digest-verified model pack fetch",
+}
+
+# The exemption has to be load-bearing. One listed here with no network call in
+# it would silently widen the gate the day somebody adds one.
+for path in EXEMPT:
+    if not path.exists():
+        raise SystemExit(f"Local-only policy exempts a missing file: {path}")
+    if not offending(path.read_text(encoding="utf-8")):
+        raise SystemExit(
+            f"Local-only policy exempts {path.name}, but nothing in it needs the exemption. "
+            "Remove the exemption rather than leaving the gate wider than the code."
+        )
+
 scanned = 0
 for source in SOURCES:
     if not source.exists():
         raise SystemExit(f"Local-only policy cannot scan a missing source: {source}")
+    if source in EXEMPT:
+        continue
     hits = offending(source.read_text(encoding="utf-8"))
     if hits:
         raise SystemExit(f"Local-only policy rejected {source}: {', '.join(hits)}")
     scanned += 1
 
+# The conversion engine must not import the fetcher at module scope. If it did,
+# every conversion would load a network client and the separation the exemption
+# rests on would exist only on paper. No leading whitespace: an indented import
+# is inside a function, which is exactly where it is required to be.
+for line in (ROOT / "engine" / "philon_engine.py").read_text(encoding="utf-8").splitlines():
+    if re.match(r"^(?:from|import)\s+model_fetch\b", line):
+        raise SystemExit(
+            "engine/philon_engine.py imports model_fetch at module scope; "
+            "it must import it inside the fetch action."
+        )
+
 print(f"Local-only policy passed for {scanned} production sources "
-      f"({len(MUST_REJECT)} rejection samples and {len(MUST_ACCEPT)} acceptance samples verified first).")
+      f"({len(MUST_REJECT)} rejection samples and {len(MUST_ACCEPT)} acceptance samples verified first, "
+      f"{len(EXEMPT)} named exemption checked to be load-bearing and not reachable from a conversion).")

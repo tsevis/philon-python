@@ -12,7 +12,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 _data_dir = tempfile.mkdtemp(prefix="philon-gui-test-")
 os.environ["PHILON_DATA_DIR"] = _data_dir
 
-from philon_desktop.gui.qt import QApplication  # noqa: E402
+from philon_desktop.gui.qt import QApplication, QPushButton  # noqa: E402
 from philon_desktop.gui import theme  # noqa: E402
 
 _app = QApplication.instance() or QApplication([])
@@ -317,6 +317,45 @@ class EvidenceForNewFieldsTest(unittest.TestCase):
         self.assertEqual(
             measured_formula_summary({"evidence": {"findings": {"set_in_mathematical_face": True}}}),
             "Set in a mathematical face")
+
+    def test_a_download_is_offered_only_for_a_pack_that_is_not_already_here(self):
+        from philon_desktop.gui.secondary_pages import ModelsView
+
+        view = ModelsView()
+        view.set_packs([
+            {"id": "fetchable", "role": "r", "runtime": "local", "license": "Apache-2.0", "approved": True,
+             "required": False, "available_locally": False, "downloadable": True,
+             "download_bytes": 545590272, "download_verified": True, "readiness": "not-found"},
+            {"id": "already-here", "role": "r", "runtime": "local", "license": "Apache-2.0", "approved": True,
+             "required": False, "available_locally": True, "downloadable": True,
+             "download_bytes": 100, "download_verified": True, "readiness": "ready"},
+            {"id": "unapproved", "role": "r", "runtime": "local", "license": "x", "approved": False,
+             "required": False, "available_locally": False, "downloadable": True,
+             "download_bytes": 100, "readiness": "blocked"},
+        ], [])
+        labels = [button.text() for button in view.findChildren(QPushButton)]
+        self.assertEqual(labels.count("Download"), 1)
+
+    def test_the_pane_names_the_size_and_that_the_bytes_are_checked(self):
+        from philon_desktop.gui.secondary_pages import pack_download_label, model_setup_summary
+
+        self.assertIsNone(pack_download_label({}))
+        self.assertEqual(
+            pack_download_label({"downloadable": True, "download_bytes": 545590272, "download_verified": True}),
+            "520 MB, checked against a SHA-256")
+        self.assertEqual(
+            pack_download_label({"downloadable": True, "download_bytes": 6_940_000_000, "download_verified": True}),
+            "6.5 GB, checked against a SHA-256")
+        self.assertEqual(
+            pack_download_label({"downloadable": True, "download_bytes": 1048576, "download_verified": False}),
+            "1 MB, no digest declared")
+        # Built-in runtimes and packs policy blocks pad neither half.
+        self.assertEqual(model_setup_summary([{"required": True, "approved": True, "available_locally": True}]),
+                         "No optional model packs are approved for this build.")
+        self.assertEqual(model_setup_summary([
+            {"required": False, "approved": True, "available_locally": True},
+            {"required": False, "approved": True, "available_locally": False, "downloadable": True},
+        ]), "1 of 2 approved packs are already on this machine; 1 can be downloaded.")
 
     def test_the_summary_reads_for_each_shape_of_link_evidence(self):
         from philon_desktop.gui.evidence_panel import link_summary
