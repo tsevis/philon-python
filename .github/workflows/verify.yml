@@ -72,8 +72,38 @@ jobs:
       # which reads like the repository is missing rather than the scope wrong.
       - name: Explain a failed peer checkout
         if: failure() && steps.peer.outcome == 'failure'
+        env:
+          PEER_TOKEN: ${{ secrets.PHILON_PEER_TOKEN }}
         run: |
-          echo "::error::Could not check out tsevis/philon. PHILON_PEER_TOKEN on tsevis/philon-python must be scoped to tsevis/philon -- the PEER, not this repository. A token scoped to the wrong one of the pair reports the repository as not found. Check also that the token has not expired."
+          # Ask the API which failure this is rather than naming a likely
+          # cause. This step cannot see the checkout's own error, and the two
+          # failures need opposite fixes: an expired token is replaced, a
+          # mis-scoped one is re-scoped. Guessing cost real time on
+          # 2026-09-05, when both tokens had expired and this message sent
+          # the reader looking at scope.
+          #
+          # 401 is unambiguous. 404 is GitHub refusing to confirm a private
+          # repository exists to a token that cannot read it, so it covers
+          # both "wrong repository" and "no access to the right one".
+          # Only the status code is printed; the token is never echoed.
+          code=$(curl -sS -o /dev/null -w '%{http_code}' \
+                 -H "Authorization: Bearer ${PEER_TOKEN}" \
+                 -H "Accept: application/vnd.github+json" \
+                 "https://api.github.com/repos/tsevis/philon")
+          case "$code" in
+            401)
+              echo "::error::PHILON_PEER_TOKEN on tsevis/philon-python is expired or revoked — the API answered 401 Bad credentials, so its scope was never even considered. Create a new fine-grained PAT scoped to tsevis/philon with Contents: Read-only, then: gh secret set PHILON_PEER_TOKEN --repo tsevis/philon-python"
+              ;;
+            404)
+              echo "::error::PHILON_PEER_TOKEN on tsevis/philon-python cannot read tsevis/philon — the API answered 404, which for a private repository means the token is valid but scoped elsewhere. It must be scoped to tsevis/philon, the PEER, not to tsevis/philon-python."
+              ;;
+            200)
+              echo "::error::PHILON_PEER_TOKEN on tsevis/philon-python can read tsevis/philon — the API answered 200, so the token is fine and the checkout failed for another reason. Read the checkout step's own log above."
+              ;;
+            *)
+              echo "::error::Could not check out tsevis/philon, and probing the API for it returned $code. Neither an expired token (401) nor a scope problem (404); read the checkout step's own log above."
+              ;;
+          esac
           exit 1
 
       - uses: actions/setup-python@v7
