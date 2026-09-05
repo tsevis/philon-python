@@ -19,7 +19,7 @@ jobs:
     # against the Vision framework, and `hdiutil` and `codesign` are macOS. This
     # job bills at 10x, which is why `verify.yml` does the cheap half on Linux
     # and why this one runs on a tag rather than on every push.
-    runs-on: macos-15
+    runs-on: [self-hosted, macOS]
     permissions:
       contents: read
     steps:
