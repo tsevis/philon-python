@@ -175,40 +175,72 @@ and a red or absent run means nothing.
    limit. Until then no job of either kind starts.
 2. **Outstanding.** Re-enable `philon`'s two workflows, which are currently
    disabled. Only after (1), or they will simply resume failing at job start.
-3. **Done, 2026-08-23.** `PHILON_PEER_TOKEN` is set on both repositories.
+3. **Superseded, 2026-09-06.** The two fine-grained PATs were replaced by two
+   read-only **deploy keys**, and `PHILON_PEER_TOKEN` was deleted from both
+   repositories.
 
-   **Two tokens, one per repository, each scoped to read only its peer.** A
-   single token with read on both would mean a compromise of either repository's
-   Actions granting read to both; neither token needs to read the repository
-   that holds it. Both are fine-grained PATs with **Contents: Read-only**:
+   **Why the tokens went.** They expired on 2026-09-05 and took both peer
+   checkouts down with them. A replacement pair written on 2026-09-06 was
+   rejected the same way — GitHub answered `401 Bad credentials` to the new
+   values as well — so the second red day cost as much as the first and told
+   nobody anything about the code. The prediction in the paragraph this replaces
+   ("Fine-grained tokens expire, and the same two steps are what will report it
+   when these do") was correct, and the reporting worked exactly as designed.
+   What it could not do was stop the expiry happening again a year later.
 
-   | Token scoped to | Stored as `PHILON_PEER_TOKEN` in | Written |
+   **A deploy key does not expire.** That is the whole reason for the switch.
+   `actions/checkout` takes one as `ssh-key:` in place of `token:`.
+
+   **Two keys, one per repository, each installed on its PEER.** A single key
+   with read on both would mean a compromise of either repository's Actions
+   granting read to both; neither key is installed on the repository that holds
+   it. Both are `ed25519`, **read-only** (write access unticked):
+
+   | Public half is a deploy key on | Private half stored as `PHILON_PEER_SSH_KEY` in |
+   |---|---|
+   | `tsevis/philon-python` | `tsevis/philon` |
+   | `tsevis/philon` | `tsevis/philon-python` |
+
+   **What is set is still not the same as what is correct.** Actions secrets
+   remain write-only: neither the owner nor a tool can read a value back, and
+   `gh secret list` reports that a secret exists, not that it holds what it
+   should — an earlier attempt left one holding the literal string
+   `PASTE_TOKEN_HERE` and every count still read `1`. A CI run is the only thing
+   that can tell you.
+
+   **The crossed-keys mistake stays detectable, and this is why.** GitHub accepts
+   a given deploy key on exactly one repository, so its SSH endpoint separates
+   the two failures that need opposite fixes:
+
+   | SSH says | Means | Fix |
    |---|---|---|
-   | `tsevis/philon-python` | `tsevis/philon` | 2026-08-23T15:47:48Z |
-   | `tsevis/philon` | `tsevis/philon-python` | 2026-08-23T15:45:53Z |
+   | `Permission denied (publickey)` | the key is not installed anywhere | install the public half, or regenerate the pair |
+   | `Repository not found` | the key is valid, but on the wrong repository | move it to the PEER |
+   | *(succeeds)* | the key is fine | the checkout failed for another reason |
 
-   **What is set is not the same as what is correct, and nothing has checked
-   the second.** Actions secrets are write-only: neither the owner nor a tool
-   can read a value back, and no job can exercise them until the billing
-   clears. `gh secret list` and `.total_count` report that a secret exists, not
-   that it holds what it should — an earlier attempt left one holding the
-   literal string `PASTE_TOKEN_HERE` and every count still read `1`. The
-   timestamps above are the only evidence, and they show when a value was
-   written, not which value.
+   Both workflows carry a step named *Explain a failed peer checkout* that runs
+   `git ls-remote` over the key and prints whichever of those applies. A secret
+   absent altogether is caught earlier by *Check the peer-repository key is
+   present*. The key is written `0600` into a temp dir, removed on exit, and
+   never echoed.
 
-   So the first CI run after 1 September is the first thing that can tell you.
-   If the two are crossed, the peer checkout fails as *Repository not found*,
-   which reads like a missing repository rather than a wrong scope; both
-   workflows carry a step named *Explain a failed peer checkout* that says so.
-   A secret absent altogether is caught earlier by *Check the peer-repository
-   token is present*. Fine-grained tokens expire, and the same two steps are
-   what will report it when these do.
+   To generate and install a pair — the public half goes on the repository being
+   *read*, the private half on the repository doing the reading:
 
-   To replace either, paste at the prompt rather than passing the value as an
-   argument, so no token lands in shell history:
+       ssh-keygen -t ed25519 -N "" -f /tmp/philon-peer   -C "philon-python reads philon"
+       ssh-keygen -t ed25519 -N "" -f /tmp/philonpy-peer -C "philon reads philon-python"
 
-       gh secret set PHILON_PEER_TOKEN --repo tsevis/philon          # the philon-python-scoped token
-       gh secret set PHILON_PEER_TOKEN --repo tsevis/philon-python   # the philon-scoped token
+       # /tmp/philon-peer.pub    -> deploy key on tsevis/philon,        read-only
+       # /tmp/philonpy-peer.pub  -> deploy key on tsevis/philon-python, read-only
+
+       gh secret set PHILON_PEER_SSH_KEY --repo tsevis/philon-python < /tmp/philon-peer
+       gh secret set PHILON_PEER_SSH_KEY --repo tsevis/philon        < /tmp/philonpy-peer
+
+       shred -u /tmp/philon-peer /tmp/philonpy-peer 2>/dev/null || rm -f /tmp/philon-peer /tmp/philonpy-peer
+
+   The self-hosted runners need outbound SSH to `github.com` on port 22. If that
+   is blocked, `ssh.github.com:443` is the documented alternative and needs a
+   `Host github.com` block in the runner's SSH config.
 
 Nothing is unprotected in the meantime, and no work needs to wait for it. Every
 gate the Linux job would run — including the parity gate, the one that matters
