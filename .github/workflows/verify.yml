@@ -42,68 +42,70 @@ jobs:
         with:
           path: philon_p
 
-      # A missing or expired token fails the checkout below with an error that
-      # names neither the secret nor the fix. Say it here instead, before the
-      # confusing one happens.
+      # A missing key fails the checkout below with an error that names neither
+      # the secret nor the fix. Say it here instead, before the confusing one.
       #
-      # There are two tokens, one per repository, each scoped to read ONLY its
-      # peer -- so this repository's token can read tsevis/philon and cannot read
-      # tsevis/philon-python. Neither token needs to read the repository holding it.
-      - name: Check the peer-repository token is present
+      # There are two deploy keys, one per repository, each installed read-only
+      # on its PEER -- so this repository holds the private half of the key that
+      # tsevis/philon-python uses to read tsevis/philon. A deploy key is
+      # accepted by exactly one repository on GitHub, which is what makes the
+      # crossed-keys mistake below detectable.
+      - name: Check the peer-repository key is present
         env:
-          PEER_TOKEN: ${{ secrets.PHILON_PEER_TOKEN }}
+          PEER_KEY: ${{ secrets.PHILON_PEER_SSH_KEY }}
         run: |
-          if [ -z "${PEER_TOKEN}" ]; then
-            echo "::error::PHILON_PEER_TOKEN is not set on tsevis/philon-python. The parity gate has to check out tsevis/philon, which is private and which the built-in GITHUB_TOKEN cannot read. Create a fine-grained PAT scoped to tsevis/philon only, with Contents: Read-only, and add it as PHILON_PEER_TOKEN here."
+          if [ -z "${PEER_KEY}" ]; then
+            echo "::error::PHILON_PEER_SSH_KEY is not set on tsevis/philon-python. The parity gate has to check out tsevis/philon, which is private and which the built-in GITHUB_TOKEN cannot read. Generate a keypair, add the PUBLIC half to tsevis/philon as a read-only deploy key, and add the PRIVATE half here as PHILON_PEER_SSH_KEY."
             exit 1
           fi
 
       # The source project, so the parity gate has something to compare against.
+      # ssh-key rather than token: a deploy key does not expire, which is the
+      # failure this replaces -- both PATs lapsed on 2026-09-05 and again on
+      # 2026-09-06, costing two red builds that had nothing to do with the code.
       - name: Check out the source project
         id: peer
         uses: actions/checkout@v7
         with:
           repository: tsevis/philon
-          token: ${{ secrets.PHILON_PEER_TOKEN }}
+          ssh-key: ${{ secrets.PHILON_PEER_SSH_KEY }}
           path: philon
 
-      # The likely misconfiguration, once there are two tokens: they get crossed.
-      # A token scoped to the wrong repository fails as "Repository not found",
-      # which reads like the repository is missing rather than the scope wrong.
+      # The likely misconfiguration, once there are two keys: they get crossed.
+      # A key installed on the wrong repository fails as "Repository not found",
+      # which reads like the repository is missing rather than the key misplaced.
       - name: Explain a failed peer checkout
         if: failure() && steps.peer.outcome == 'failure'
         env:
-          PEER_TOKEN: ${{ secrets.PHILON_PEER_TOKEN }}
+          PEER_KEY: ${{ secrets.PHILON_PEER_SSH_KEY }}
         run: |
-          # Ask the API which failure this is rather than naming a likely
-          # cause. This step cannot see the checkout's own error, and the two
-          # failures need opposite fixes: an expired token is replaced, a
-          # mis-scoped one is re-scoped. Guessing cost real time on
-          # 2026-09-05, when both tokens had expired and this message sent
-          # the reader looking at scope.
+          # Ask GitHub over SSH which failure this is rather than naming a
+          # likely cause. This step cannot see the checkout's own error, and
+          # the two failures need opposite fixes: an unrecognised key is
+          # replaced, a misplaced one is moved to the right repository.
           #
-          # 401 is unambiguous. 404 is GitHub refusing to confirm a private
-          # repository exists to a token that cannot read it, so it covers
-          # both "wrong repository" and "no access to the right one".
-          # Only the status code is printed; the token is never echoed.
-          code=$(curl -sS -o /dev/null -w '%{http_code}' \
-                 -H "Authorization: Bearer ${PEER_TOKEN}" \
-                 -H "Accept: application/vnd.github+json" \
-                 "https://api.github.com/repos/tsevis/philon")
-          case "$code" in
-            401)
-              echo "::error::PHILON_PEER_TOKEN on tsevis/philon-python is expired or revoked — the API answered 401 Bad credentials, so its scope was never even considered. Create a new fine-grained PAT scoped to tsevis/philon with Contents: Read-only, then: gh secret set PHILON_PEER_TOKEN --repo tsevis/philon-python"
-              ;;
-            404)
-              echo "::error::PHILON_PEER_TOKEN on tsevis/philon-python cannot read tsevis/philon — the API answered 404, which for a private repository means the token is valid but scoped elsewhere. It must be scoped to tsevis/philon, the PEER, not to tsevis/philon-python."
-              ;;
-            200)
-              echo "::error::PHILON_PEER_TOKEN on tsevis/philon-python can read tsevis/philon — the API answered 200, so the token is fine and the checkout failed for another reason. Read the checkout step's own log above."
-              ;;
-            *)
-              echo "::error::Could not check out tsevis/philon, and probing the API for it returned $code. Neither an expired token (401) nor a scope problem (404); read the checkout step's own log above."
-              ;;
-          esac
+          # GitHub's SSH endpoint separates them cleanly:
+          #   "Permission denied (publickey)" -> the key is not installed anywhere
+          #   "Repository not found"          -> the key is valid, but on another repo
+          # The key is written 0600 to a private temp dir and removed after;
+          # it is never echoed, and ls-remote prints only refs.
+          keydir="$(mktemp -d)"
+          trap 'rm -rf "$keydir"' EXIT
+          printf '%s\n' "${PEER_KEY}" > "$keydir/id"
+          chmod 600 "$keydir/id"
+
+          out=$(GIT_SSH_COMMAND="ssh -i $keydir/id -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new" \
+                git ls-remote git@github.com:tsevis/philon.git 2>&1) && status=0 || status=$?
+
+          if [ "$status" -eq 0 ]; then
+            echo "::error::PHILON_PEER_SSH_KEY on tsevis/philon-python can read tsevis/philon — ls-remote succeeded, so the key is fine and the checkout failed for another reason. Read the checkout step's own log above."
+          elif printf '%s' "$out" | grep -qi 'permission denied'; then
+            echo "::error::PHILON_PEER_SSH_KEY on tsevis/philon-python is not recognised by GitHub — SSH answered 'Permission denied (publickey)', so it was never matched to a repository. Add the PUBLIC half of this keypair to tsevis/philon as a read-only deploy key, or regenerate the pair and set both halves."
+          elif printf '%s' "$out" | grep -qi 'repository not found'; then
+            echo "::error::PHILON_PEER_SSH_KEY on tsevis/philon-python cannot read tsevis/philon — SSH answered 'Repository not found', which for a valid key means it is installed on the wrong repository. The public half must be a deploy key on tsevis/philon, the PEER, not on tsevis/philon-python."
+          else
+            echo "::error::Could not check out tsevis/philon, and probing it over SSH failed for another reason. Neither an unrecognised key nor a misplaced one; read the checkout step's own log above."
+          fi
           exit 1
 
       - uses: actions/setup-python@v7
