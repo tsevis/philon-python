@@ -19,22 +19,31 @@ jobs:
     # against the Vision framework, and `hdiutil` and `codesign` are macOS. This
     # job bills at 10x, which is why `verify.yml` does the cheap half on Linux
     # and why this one runs on a tag rather than on every push.
-    runs-on: [self-hosted, macOS]
+    # HOSTED, FOR THE REASON verify.yml ALREADY RECORDS. This repository is
+    # public, and the fleet refuses a public repository a runner on the
+    # owner's Mac -- a fork's pull request would run its author's code there.
+    # So this label was one no runner would ever answer, and it kept the
+    # repository on a managed list it could never be served from: three
+    # containers crash-looped 580 times overnight because of entries like it.
+    #
+    # Free, and measured rather than assumed. 2026-09-16, philon's own first
+    # hosted run, `/actions/runs/35092479590/timing`:
+    #
+    #   {"MACOS":{"jobs":1,"total_ms":0},"UBUNTU":{"jobs":1,"total_ms":0}}
+    runs-on: macos-15
     permissions:
       contents: read
     steps:
       - uses: actions/checkout@v7
 
-      # actions/setup-python hardcodes /Users/runner/hostedtoolcache on macOS
-      # (the IS_MAC branch of its run()), overwriting RUNNER_TOOL_CACHE. That
-      # path does not exist on a self-hosted Mac and cannot be created without
-      # root. uv supplies the same interpreter; --seed gives a writable venv so
-      # `pip install` is not refused by PEP 668.
-      - name: Set up Python 3.10 (self-hosted macOS)
-        run: |
-          uv python install "3.10"
-          uv venv --seed --python "3.10" "$RUNNER_TEMP/venv"
-          echo "$RUNNER_TEMP/venv/bin" >> "$GITHUB_PATH"
+      # `actions/setup-python` again. It hardcodes
+      # /Users/runner/hostedtoolcache on macOS, a path that does not exist on
+      # a self-hosted Mac and cannot be created without root -- and that IS
+      # the tool cache on a hosted one. The `uv` dance was the workaround for
+      # the machine this job no longer runs on.
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.10"
       # scripts/package-macos.sh builds and uses .venv, so CI builds the same
       # environment a developer has rather than a system one the script cannot
       # see. PyInstaller collects what it can import, so packaging from a
