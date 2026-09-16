@@ -36,7 +36,30 @@ concurrency:
 
 jobs:
   engine-and-policy:
-    runs-on: [self-hosted, linux]
+    # HOSTED, BECAUSE THIS REPOSITORY IS PUBLIC AND THE FLEET REFUSES IT.
+    #
+    # `tsevisrunner status` on 2026-09-16:
+    #
+    #   PUBLIC — NO RUNNER WILL BE STARTED
+    #     philon-python  it went public while managed; nothing will be started
+    #
+    # That refusal is right and is not a preference. On a public repository a
+    # `pull_request` workflow runs the author's code, and anyone can be the
+    # author -- on that Mac, as its owner, with its SSH keys and its `gh`
+    # credentials. The app says so in one sentence: "Use GitHub-hosted runners
+    # there; public repos get unlimited free minutes anyway."
+    #
+    # So the label was asking for something that could never arrive, and the
+    # runs said exactly that: two of them queued from 2026-09-16T03:42Z with
+    # no runner registered to this repository and no clock running, because a
+    # job's `timeout-minutes` only starts once it is PICKED UP.
+    #
+    # Nothing in this job needs the machine. It checks out, installs Python
+    # through `actions/setup-python`, builds a venv from `requirements.txt`
+    # and runs unittest and four policy scripts. The one step that needed
+    # anything local -- the peer checkout -- already does not run on a pull
+    # request, which is this pull request's own subject.
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
         with:
@@ -51,6 +74,16 @@ jobs:
       # accepted by exactly one repository on GitHub, which is what makes the
       # crossed-keys mistake below detectable.
       - name: Check the peer-repository key is present
+        # NOT ON A PULL REQUEST. This step needs PHILON_PEER_TOKEN to read
+        # tsevis/philon, and a credential that expires is a credential that
+        # WILL expire: 15 of the last 17 runs here were red, every one of them
+        # 401 Bad credentials, none of them about this repository's code.
+        #
+        # A pull request must be able to go green on what it changed. The
+        # parity question is real and still asked -- on push and on the
+        # nightly, where a stale token is a notice rather than a wall across
+        # every branch.
+        if: github.event_name != 'pull_request'
         env:
           PEER_KEY: ${{ secrets.PHILON_PEER_SSH_KEY }}
         run: |
@@ -64,6 +97,7 @@ jobs:
       # failure this replaces -- both PATs lapsed on 2026-09-05 and again on
       # 2026-09-06, costing two red builds that had nothing to do with the code.
       - name: Check out the source project
+        if: github.event_name != 'pull_request'
         id: peer
         uses: actions/checkout@v7
         with:
@@ -76,6 +110,7 @@ jobs:
       # which reads like the repository is missing rather than the key misplaced.
       - name: Explain a failed peer checkout
         if: failure() && steps.peer.outcome == 'failure'
+          && github.event_name != 'pull_request'
         env:
           PEER_KEY: ${{ secrets.PHILON_PEER_SSH_KEY }}
         run: |
@@ -136,6 +171,7 @@ jobs:
       # here: a parity gate that passes without a peer to compare against is
       # indistinguishable from one that compared and was satisfied.
       - name: Engine parity against the source project
+        if: github.event_name != 'pull_request'
         working-directory: philon_p
         env:
           PHILON_PARITY_PEER: ${{ github.workspace }}/philon
