@@ -36,7 +36,30 @@ concurrency:
 
 jobs:
   engine-and-policy:
-    runs-on: [self-hosted, linux]
+    # HOSTED, BECAUSE THIS REPOSITORY IS PUBLIC AND THE FLEET REFUSES IT.
+    #
+    # `tsevisrunner status` on 2026-09-16:
+    #
+    #   PUBLIC — NO RUNNER WILL BE STARTED
+    #     philon-python  it went public while managed; nothing will be started
+    #
+    # That refusal is right and is not a preference. On a public repository a
+    # `pull_request` workflow runs the author's code, and anyone can be the
+    # author -- on that Mac, as its owner, with its SSH keys and its `gh`
+    # credentials. The app says so in one sentence: "Use GitHub-hosted runners
+    # there; public repos get unlimited free minutes anyway."
+    #
+    # So the label was asking for something that could never arrive, and the
+    # runs said exactly that: two of them queued from 2026-09-16T03:42Z with
+    # no runner registered to this repository and no clock running, because a
+    # job's `timeout-minutes` only starts once it is PICKED UP.
+    #
+    # Nothing in this job needs the machine. It checks out, installs Python
+    # through `actions/setup-python`, builds a venv from `requirements.txt`
+    # and runs unittest and four policy scripts. The one step that needed
+    # anything local -- the peer checkout -- already does not run on a pull
+    # request, which is this pull request's own subject.
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
         with:
