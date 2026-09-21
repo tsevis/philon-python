@@ -59,12 +59,7 @@ jobs:
     # and runs unittest and four policy scripts. The one step that needed
     # anything local -- the peer checkout -- already does not run on a pull
     # request, which is this pull request's own subject.
-    # Self-hosted on the Mac rather than Linux, and on the SAME runner as
-    # release.yml so this repository costs no container. What this job needs
-    # is what the comment above says it needs -- a checkout, a Python, a venv
-    # and four scripts -- and none of that is Linux. What it must NOT be is
-    # hosted: this repository is private, so every minute here is billed.
-    runs-on: [self-hosted, macOS]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
         with:
