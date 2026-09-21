@@ -19,18 +19,23 @@ jobs:
     # against the Vision framework, and `hdiutil` and `codesign` are macOS. This
     # job bills at 10x, which is why `verify.yml` does the cheap half on Linux
     # and why this one runs on a tag rather than on every push.
-    # HOSTED, FOR THE REASON verify.yml ALREADY RECORDS. This repository is
-    # public, and the fleet refuses a public repository a runner on the
-    # owner's Mac -- a fork's pull request would run its author's code there.
-    # So this label was one no runner would ever answer, and it kept the
-    # repository on a managed list it could never be served from: three
-    # containers crash-looped 580 times overnight because of entries like it.
+    # SELF-HOSTED, because the reason recorded here was about a different
+    # repository. It said "this repository is public", and free minutes were
+    # measured on `philon`'s run 35092479590 -- philon IS public, and a public
+    # repository bills nothing. THIS repository is private: `gh repo list`
+    # reports philon_p private on 2026-09-21, so every one of these macOS
+    # minutes bills at 10x against an allowance of 3,000 a month. cgmcreator
+    # spent 2,638 of them in five days on `ubuntu-latest` at 1x; this job is
+    # ten times more expensive per minute than that was.
     #
-    # Free, and measured rather than assumed. 2026-09-16, philon's own first
-    # hosted run, `/actions/runs/35092479590/timing`:
+    # The fleet may serve it: the refusal is about PUBLIC repositories, where
+    # a fork's pull request would run its author's code on the owner's Mac.
+    # A private repository has no such door, and `add philon_p --macos`
+    # registered the runner that answers this label on 2026-09-21.
     #
-    #   {"MACOS":{"jobs":1,"total_ms":0},"UBUNTU":{"jobs":1,"total_ms":0}}
-    runs-on: macos-15
+    # Nothing here needs a clean machine: the signing is ad-hoc, with no
+    # certificate, no keychain and no secret to import.
+    runs-on: [self-hosted, macOS]
     permissions:
       contents: read
     steps:
