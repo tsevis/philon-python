@@ -51,8 +51,8 @@
       "integrity": "Per-repair local manifest fingerprint; Philon does not distribute these user-managed weights",
       "license": "Apache-2.0 — official olmOCR-2 model card verified 2026-08-16",
       "runtime": "MLX-VLM external local runtime (not bundled)",
-      "discovery_paths": [
-        "~/AI/ClaudeCode/mozaix/models/richardyoung/olmOCR-2-7B-1025-MLX-6bit"
+      "discovery_names": [
+        "richardyoung/olmOCR-2-7B-1025-MLX-6bit"
       ]
     },
     {
@@ -64,8 +64,8 @@
       "integrity": null,
       "license": "Qwen Research License — non-commercial; blocked from Philon production use",
       "runtime": "MLX adapter (not bundled)",
-      "discovery_paths": [
-        "~/AI/ClaudeCode/mozaix/models/Qwen2.5-VL-3B-Instruct"
+      "discovery_names": [
+        "Qwen2.5-VL-3B-Instruct"
       ]
     },
     {

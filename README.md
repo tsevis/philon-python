@@ -51,6 +51,8 @@ python3 -m venv .venv
 
 Application data is stored in `~/Library/Application Support/Philon Python`. Set `PHILON_DATA_DIR` to an alternate local directory for testing or an isolated deployment.
 
+Set `PHILON_EXTRA_MODEL_DIRS` to extra model folders (separated by `:` on macOS) and the Models pane looks up each pack's `discovery_names` from `engine/model-manifest.json` inside them.
+
 ## Verify
 
 ```bash
