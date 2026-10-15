@@ -306,6 +306,25 @@ class PhilonEngineTest(unittest.TestCase):
             finally:
                 engine.MODEL_MANIFEST_PATH = prior
 
+    def test_extra_model_dirs_variable_finds_a_packs_named_folder(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "vendor" / "model-folder").mkdir(parents=True)
+            manifest = root / "model-manifest.json"
+            manifest.write_text(json.dumps({
+                "schema_version": "1.2",
+                "packs": [{"id": "candidate", "role": "test candidate", "required": False, "approved": False, "distribution": "user-managed-local-copy", "integrity": None, "license": "unverified", "runtime": "adapter", "discovery_names": ["vendor/model-folder"]}],
+            }), encoding="utf-8")
+            searched = os.pathsep.join([str(root / "missing"), str(root)])
+            with unittest.mock.patch.object(engine, "MODEL_MANIFEST_PATH", manifest):
+                with unittest.mock.patch.dict(os.environ, {"PHILON_EXTRA_MODEL_DIRS": searched}):
+                    pack = engine.model_status()["packs"][0]
+                self.assertTrue(pack["available_locally"])
+                self.assertEqual(pack["local_path"], str(root / "vendor" / "model-folder"))
+                with unittest.mock.patch.dict(os.environ):
+                    os.environ.pop("PHILON_EXTRA_MODEL_DIRS", None)
+                    self.assertFalse(engine.model_status()["packs"][0]["available_locally"])
+
     def test_manual_olmocr_repair_retains_an_unselected_evidence_candidate(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

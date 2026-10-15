@@ -12,8 +12,8 @@ Nothing here is broken. Both projects are green, clean and pushed.
 
 Two repos, kept in parity:
 
-    /Users/tsevis/AI/ClaudeCode/philon      (Tauri/React + Rust + Python engine)
-    /Users/tsevis/AI/ClaudeCode/philon_p    (PySide6 Qt port of the same engine)
+    <path>/philon      (Tauri/React + Rust + Python engine)
+    <path>/philon_p    (PySide6 Qt port of the same engine)
 
 Both on `main`, clean, pushed, `main...origin/main`.
 

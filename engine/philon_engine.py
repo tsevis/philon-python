@@ -57,6 +57,8 @@ MAX_EXTRACTED_ASSET_BYTES = 250 * 1024 * 1024
 SUPPORTED_SUFFIXES = {".pdf", ".png", ".jpg", ".jpeg", ".tiff", ".tif", ".webp"}
 DEFAULT_OUTPUTS = ("machine", "markdown", "html", "ir", "chunks", "evidence", "table_csv", "assets", "manifest")
 MODEL_MANIFEST_PATH = Path(__file__).with_name("model-manifest.json")
+# Extra directories searched for a pack's `discovery_names`, separated by os.pathsep.
+EXTRA_MODEL_DIRS_ENV = "PHILON_EXTRA_MODEL_DIRS"
 VISION_HELPER: Path | None = None
 
 
@@ -95,6 +97,8 @@ def load_model_manifest() -> dict[str, Any]:
             raise ValueError(f"Model pack {pack['id']} is missing distribution, runtime, or licence metadata.")
         if "discovery_paths" in pack and (not isinstance(pack["discovery_paths"], list) or not all(isinstance(item, str) and item for item in pack["discovery_paths"])):
             raise ValueError(f"Model pack {pack['id']} has invalid local discovery paths.")
+        if "discovery_names" in pack and (not isinstance(pack["discovery_names"], list) or not all(isinstance(item, str) and item and not Path(item).is_absolute() and ".." not in Path(item).parts for item in pack["discovery_names"])):
+            raise ValueError(f"Model pack {pack['id']} has invalid local discovery names.")
         if pack["required"] and (not pack["approved"] or not pack.get("integrity") or pack["distribution"] == "not-distributed"):
             raise ValueError(f"Required model pack {pack['id']} is not approved with integrity metadata.")
         if pack["approved"] and not pack.get("integrity"):
@@ -171,6 +175,11 @@ def managed_model_store() -> Path:
     return philon_data_root() / "models"
 
 
+def extra_model_dirs() -> list[str]:
+    """Directories named in PHILON_EXTRA_MODEL_DIRS, separated by os.pathsep."""
+    return [item for item in (part.strip() for part in os.environ.get(EXTRA_MODEL_DIRS_ENV, "").split(os.pathsep)) if item]
+
+
 def model_status() -> dict[str, Any]:
     """Expose declared model gates and offline runtime readiness without fetching.
 
@@ -180,12 +189,14 @@ def model_status() -> dict[str, Any]:
     """
     manifest = load_model_manifest()
     store = managed_model_store()
+    extra_dirs = [glob.escape(os.path.expanduser(item)) for item in extra_model_dirs()]
     packs = []
     for pack in manifest.get("packs", []):
         # A pack Philon fetched lives in the store it manages; one a person
         # installed lives wherever they put it. Both count as present, and the
         # managed copy is looked at last so a hand-installed one wins.
-        candidates = [*pack.get("discovery_paths", []), str(store / str(pack["id"]))]
+        named = [str(Path(root) / name) for root in extra_dirs for name in pack.get("discovery_names", [])]
+        candidates = [*pack.get("discovery_paths", []), *named, str(store / str(pack["id"]))]
         local_path = next((str(found) for candidate in candidates for found in sorted(Path(item) for item in glob.glob(os.path.expanduser(candidate))) if found.exists()), None)
         available_locally = local_path is not None
         built_in = pack["id"] == "native-pdfium" or (pack["id"] == "apple-vision-ocr" and VISION_HELPER is not None and VISION_HELPER.exists())
