@@ -8,14 +8,28 @@ the first-launch splash, and the maker's mark at the foot of the window.
 
 from __future__ import annotations
 
+import logging
 import sys
+from pathlib import Path
 
 from .gui import theme
 from .gui.main_window import MainWindow
-from .gui.qt import QApplication
+from .gui.qt import QApplication, QIcon
 from .gui.workers import WorkThread, stop_leftover_children, wait_for_workers
 
 __all__ = ["MainWindow", "WorkThread", "stop_leftover_children", "wait_for_workers", "main"]
+
+logger = logging.getLogger(__name__)
+
+ICON_PATH = Path(__file__).resolve().parent / "assets" / "AppIcon.png"
+
+
+def set_app_icon(app: QApplication) -> None:
+    """Give the application its icon; a missing file costs only the icon."""
+    if not ICON_PATH.is_file():
+        logger.warning("App icon not found: %s", ICON_PATH)
+        return
+    app.setWindowIcon(QIcon(str(ICON_PATH)))
 
 
 def follow_system_appearance(app: QApplication, holder: dict) -> None:
@@ -50,6 +64,7 @@ def main() -> None:
     app = QApplication(sys.argv)
     app.setApplicationName("Philon")
     app.setOrganizationName("Philon")
+    set_app_icon(app)
     theme.apply_application_font(app)
     theme.reset_tokens()
     app.setStyleSheet(theme.build_qss())
